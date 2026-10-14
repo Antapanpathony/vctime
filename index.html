@@ -1,0 +1,3098 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Term Sheet — a venture capital game</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #080c11; overflow: hidden; }
+  canvas { display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
+  noscript { color: #e0e8f0; font: 16px sans-serif; padding: 24px; display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<noscript>Term Sheet needs JavaScript (and a canvas) to run.</noscript>
+<script>
+'use strict';
+// ============================================================================
+// TERM SHEET — core utilities + static data
+// RNG state objects are plain {s:uint32} so the whole game state is JSON-safe.
+// ============================================================================
+
+// ---------- RNG ----------
+function hashStr(str) { let h = 2166136261 >>> 0; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+function mkrng(seed) { return { s: seed >>> 0 }; }
+function rf(r) { r.s = (r.s + 0x6D2B79F5) >>> 0; let t = r.s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }
+function rr(r, a, b) { return a + (b - a) * rf(r); }
+function ri(r, a, b) { return Math.floor(rr(r, a, b + 1)); }
+function rc(r, p) { return rf(r) < p; }
+function rp(r, arr) { return arr[Math.floor(rf(r) * arr.length)]; }
+function rg(r, m = 0, sd = 1) { let u = 0; while (u === 0) u = rf(r); const v = rf(r); return m + sd * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+function rpois(r, lam) { const L = Math.exp(-lam); let k = 0, p = 1; do { k++; p *= rf(r); } while (p > L && k < 50); return k - 1; }
+function rw(r, items, wfn) { let tot = 0; const ws = items.map(it => { const w = Math.max(0, wfn(it)); tot += w; return w; }); if (tot <= 0) return items[Math.floor(rf(r) * items.length)]; let x = rf(r) * tot; for (let i = 0; i < items.length; i++) { x -= ws[i]; if (x <= 0) return items[i]; } return items[items.length - 1]; }
+
+const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
+const sigmoid = x => 1 / (1 + Math.exp(-x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const sum = (arr, f) => arr.reduce((a, x) => a + (f ? f(x) : x), 0);
+
+// ---------- formatting ----------
+function fm(n, d) {
+  if (n == null || isNaN(n)) return '—';
+  const neg = n < 0; n = Math.abs(n);
+  let s;
+  if (n >= 1e9) s = (n / 1e9).toFixed(d != null ? d : n >= 1e10 ? 1 : 2) + 'B';
+  else if (n >= 1e6) s = (n / 1e6).toFixed(d != null ? d : n >= 1e7 ? 1 : 2) + 'M';
+  else if (n >= 1e3) s = (n / 1e3).toFixed(d != null ? d : n >= 1e5 ? 0 : 1) + 'k';
+  else s = Math.round(n).toString();
+  return (neg ? '-$' : '$') + s;
+}
+const fx = (n, d = 2) => (n == null || isNaN(n)) ? '—' : n.toFixed(d) + 'x';
+const fp = (n, d = 0) => (n == null || isNaN(n)) ? '—' : (n * 100).toFixed(d) + '%';
+
+// ---------- calendar ----------
+const START_YEAR = 2027;
+const FUND_WEEKS = 520;
+function dateOf(w) {
+  const y = Math.floor(w / 52), wk = w % 52;
+  return { year: START_YEAR + y, fy: y + 1, wk: wk + 1, q: Math.floor(wk / 13) + 1 };
+}
+function dateStr(w) { const d = dateOf(w); return `Y${d.fy} · Q${d.q} · Wk ${d.wk}`; }
+function calStr(w) { const d = dateOf(w); return `${START_YEAR + Math.floor(w / 52)} Q${d.q}`; }
+
+// ---------- static data ----------
+const SECTORS = [
+  { id: 'ai',     name: 'AI / ML',     col: '#b79cff', fraud: 0.07, em: 1.25, period: 330, amp: 0.85, phase: 0.18,
+    what: ['AI copilots', 'agent platforms', 'synthetic data', 'LLM eval tooling', 'inference optimisation', 'voice agents', 'AI paralegals'],
+    who: ['law firms', 'dentists', 'insurance adjusters', 'logistics teams', 'call centres', 'hospital admins', 'game studios'],
+    pre: ['Neuro', 'Cogni', 'Synth', 'Lumen', 'Vector', 'Token', 'Aleph', 'Prism', 'Axon', 'Sage'], suf: ['mind', 'ly', 'ai', 'labs', 'base', 'ware'] },
+  { id: 'fin',    name: 'Fintech',     col: '#4fd1b5', fraud: 0.06, em: 1.0, period: 400, amp: 0.55, phase: 0.55,
+    what: ['embedded payments', 'invoice financing', 'treasury tooling', 'KYC automation', 'neobank rails', 'expense management'],
+    who: ['gig workers', 'SMB merchants', 'freight brokers', 'immigrants sending money home', 'family offices', 'landlords'],
+    pre: ['Ledger', 'Mint', 'Coin', 'Pay', 'Vault', 'Cashew', 'Quota', 'Tally', 'Ratio'], suf: ['ly', 'pay', 'fi', 'stack', 'bank', 'hq'] },
+  { id: 'clim',   name: 'Climate',     col: '#7fd35f', fraud: 0.05, em: 0.85, period: 460, amp: 0.5, phase: 0.8,
+    what: ['carbon accounting', 'grid batteries', 'heat pumps', 'soil sensors', 'green steel', 'EV fleet charging'],
+    who: ['utilities', 'farms', 'cement plants', 'landlords', 'shipping lines', 'municipalities'],
+    pre: ['Terra', 'Verdant', 'Sol', 'Aero', 'Gaia', 'Ember', 'Tidal', 'Moss', 'Cinder'], suf: ['grid', 'works', 'ly', 'zero', 'cell', 'labs'] },
+  { id: 'health', name: 'Healthtech',  col: '#ff8a9b', fraud: 0.06, em: 0.95, period: 380, amp: 0.45, phase: 0.35,
+    what: ['remote patient monitoring', 'clinical trial matching', 'billing automation', 'mental health apps', 'diagnostics imaging', 'pharmacy logistics'],
+    who: ['clinics', 'payers', 'pharma sponsors', 'rural hospitals', 'nurses', 'caregivers'],
+    pre: ['Cura', 'Vita', 'Medi', 'Pulse', 'Hale', 'Nova', 'Clini', 'Remedy', 'Aura'], suf: ['health', 'care', 'ly', 'dx', 'rx', 'labs'] },
+  { id: 'saas',   name: 'B2B SaaS',    col: '#5cb4ff', fraud: 0.03, em: 1.0, period: 360, amp: 0.4, phase: 0.05,
+    what: ['workflow automation', 'revenue ops', 'procurement software', 'compliance dashboards', 'HR onboarding', 'field-service scheduling'],
+    who: ['mid-market ops teams', 'franchise owners', 'recruiters', 'auditors', 'property managers', 'construction crews'],
+    pre: ['Flow', 'Stack', 'Orbit', 'Cadence', 'Quorum', 'Beacon', 'Relay', 'Anchor', 'Keystone'], suf: ['hq', 'ly', 'io', 'works', 'desk', 'ops'] },
+  { id: 'cons',   name: 'Consumer',    col: '#ffb45c', fraud: 0.05, em: 0.9, period: 290, amp: 0.6, phase: 0.65,
+    what: ['social audio', 'creator tools', 'fitness subscriptions', 'micro-games', 'pet telehealth', 'meal kits for one'],
+    who: ['Gen Z', 'new parents', 'commuters', 'remote workers', 'hobbyists', 'dog owners'],
+    pre: ['Joy', 'Pebble', 'Wink', 'Bloom', 'Zest', 'Nudge', 'Mochi', 'Pip', 'Fable'], suf: ['app', 'ly', 'gram', 'go', 'ie', 'pop'] },
+  { id: 'dev',    name: 'Dev Tools',   col: '#e6d86a', fraud: 0.03, em: 1.05, period: 350, amp: 0.4, phase: 0.45,
+    what: ['observability', 'edge databases', 'CI acceleration', 'API gateways', 'secrets management', 'feature flagging'],
+    who: ['platform teams', 'indie hackers', 'security teams', 'game devs', 'data engineers', 'SREs'],
+    pre: ['Byte', 'Kernel', 'Fork', 'Pipe', 'Lambda', 'Rust', 'Hex', 'Shard', 'Null'], suf: ['db', 'ly', 'ctl', 'kit', 'ops', 'base'] },
+];
+const SECTOR_BY_ID = {}; SECTORS.forEach(s => SECTOR_BY_ID[s.id] = s);
+
+const CITIES = [
+  { id: 'sf',  name: 'San Francisco', short: 'SF',  region: 'AM' },
+  { id: 'ldn', name: 'London',        short: 'LDN', region: 'EU' },
+  { id: 'ber', name: 'Berlin',        short: 'BER', region: 'EU' },
+  { id: 'tlv', name: 'Tel Aviv',      short: 'TLV', region: 'EU' },
+  { id: 'sg',  name: 'Singapore',     short: 'SIN', region: 'AS' },
+  { id: 'sz',  name: 'Shenzhen',      short: 'SZX', region: 'AS' },
+  { id: 'blr', name: 'Bangalore',     short: 'BLR', region: 'AS' },
+];
+const CITY_BY_ID = {}; CITIES.forEach(c => CITY_BY_ID[c.id] = c);
+const REGION_NAMES = { AM: 'Americas', EU: 'Europe / ME', AS: 'Asia' };
+
+// bench = ARR needed to raise *this* round; pre/raise = fair round at r=1, neutral market
+const STAGES = [
+  { id: 'preseed', short: 'Pre-seed', pre: 4.5e6,  raise: 0.9e6, bench: 0,      damp: 1.2, burnMo: 40e3,  weeksOpen: [8, 13] },
+  { id: 'seed',    short: 'Seed',     pre: 12e6,   raise: 2.5e6, bench: 150e3,  damp: 1.05, burnMo: 110e3, weeksOpen: [8, 13] },
+  { id: 'a',       short: 'Series A', pre: 32e6,   raise: 10e6,  bench: 0.9e6,  damp: 0.95, burnMo: 380e3, weeksOpen: [8, 13] },
+  { id: 'b',       short: 'Series B', pre: 105e6,  raise: 28e6,  bench: 3.4e6,  damp: 0.9, burnMo: 1.0e6, weeksOpen: [8, 13] },
+  { id: 'c',       short: 'Series C', pre: 290e6,  raise: 65e6,  bench: 10e6,   damp: 0.85, burnMo: 2.4e6, weeksOpen: [8, 13] },
+  { id: 'g',       short: 'Growth',   pre: 720e6,  raise: 130e6, bench: 28e6,   damp: 0.8, burnMo: 5e6,   weeksOpen: [8, 13] },
+];
+
+const MACRO = {
+  bull:   { name: 'Bull market',     col: '#4cc38a', val: 1.2,  exit: 1.3,  ipo: 0.5,  raise: 0.6,  drift: 0.0035, rate: '3.0%' },
+  normal: { name: 'Neutral',         col: '#dbe4ee', val: 1.0,  exit: 1.0,  ipo: 0.2,  raise: 0.0,  drift: 0.0008, rate: '4.0%' },
+  bear:   { name: 'Bear market',     col: '#f2b84b', val: 0.78, exit: 0.75, ipo: 0.03, raise: -0.6, drift: -0.002, rate: '5.25%' },
+  crash:  { name: 'Recession',       col: '#ef6461', val: 0.6,  exit: 0.55, ipo: 0.0,  raise: -1.2, drift: -0.005, rate: '3.5%' },
+};
+const MACRO_TRANS = { // per quarter
+  bull:   { bull: 0.72, normal: 0.20, bear: 0.07, crash: 0.01 },
+  normal: { bull: 0.20, normal: 0.62, bear: 0.15, crash: 0.03 },
+  bear:   { bull: 0.05, normal: 0.30, bear: 0.50, crash: 0.15 },
+  crash:  { bull: 0.0,  normal: 0.30, bear: 0.50, crash: 0.20 },
+};
+
+// Rival VC firms (NPCs)
+const RIVALS = [
+  { id: 'confetti', name: 'Confetti Capital',   style: 'Spray-and-pray seed fund', brand: 32, stages: [0, 1], speed: 0.9, friendly: 0.35, va: 0.1, pay: 0.0 },
+  { id: 'lattice',  name: 'Lattice Ventures',   style: 'Top-tier seed / A', brand: 90, stages: [1, 2], speed: 0.5, friendly: 0.1, va: 0.9, pay: -0.05 },
+  { id: 'sandhill', name: 'Sandhill & Sons',    style: 'Old-guard A / B, loves a pref', brand: 72, stages: [2, 3], speed: 0.3, friendly: -0.5, va: 0.5, pay: -0.08 },
+  { id: 'apex',     name: 'Apex Growth',        style: 'Top-tier growth shop', brand: 96, stages: [3, 5], speed: 0.4, friendly: 0.0, va: 0.7, pay: 0.0 },
+  { id: 'goodvibes',name: 'Good Vibes Fund',    style: 'Founder-friendly, conservative price', brand: 52, stages: [0, 2], speed: 0.5, friendly: 0.6, va: 0.8, pay: -0.12 },
+  { id: 'hammer',   name: 'Hammerhead Capital', style: 'Pays up, hard terms', brand: 62, stages: [1, 4], speed: 0.8, friendly: -0.6, va: 0.2, pay: 0.14 },
+  { id: 'prowl',    name: 'Prowl Crossover',    style: 'Crossover — fast and expensive', brand: 76, stages: [3, 5], speed: 1.0, friendly: -0.1, va: 0.2, pay: 0.18 },
+  { id: 'seedling', name: 'Seedling Collective',style: 'Pre-seed accelerator', brand: 46, stages: [0, 0], speed: 0.8, friendly: 0.5, va: 0.6, pay: -0.05 },
+  { id: 'northbeam',name: 'Northbeam Partners', style: 'Climate & health specialists', brand: 66, stages: [1, 3], speed: 0.4, friendly: 0.1, va: 0.8, pay: 0.0, sectors: ['clim', 'health'] },
+  { id: 'kappa',    name: 'Kappa Partners',     style: 'Fintech & infra specialists', brand: 68, stages: [1, 3], speed: 0.5, friendly: -0.1, va: 0.6, pay: 0.04, sectors: ['fin', 'dev', 'saas'] },
+];
+
+// ---------- name / flavour generation ----------
+const FIRST = ['Maya', 'Arjun', 'Lena', 'Tomas', 'Priya', 'Noah', 'Yuki', 'Amara', 'Diego', 'Sofia', 'Ravi', 'Hana', 'Jonas', 'Mei', 'Omar', 'Elena', 'Kofi', 'Ingrid', 'Tariq', 'Zoe', 'Wei', 'Nadia', 'Felix', 'Anika', 'Dmitri', 'Camila', 'Idris', 'Sasha', 'Leo', 'Anya'];
+const LAST = ['Okafor', 'Lindqvist', 'Chen', 'Banerjee', 'Moreau', 'Haddad', 'Tanaka', 'Novak', 'Reyes', 'Kowalski', 'Adeyemi', 'Silva', 'Park', 'Goldberg', 'Rahman', 'Fischer', 'Mbeki', 'Lund', 'Ito', 'Castillo', 'Bianchi', 'Volkov', 'Nguyen', 'Osei', 'Weiss', 'Sharma', 'Ferreira', 'Kaplan', 'Yilmaz', 'Brandt'];
+
+const QUIRK_BAD_I = ['Name-drops investors who have never heard of them', 'LinkedIn says Stanford. Stanford says otherwise.', "Calls every metric 'directionally accurate'", 'Deck has three different TAM slides', "Insists the numbers were 'audited by a friend'", 'Gets oddly specific about irrelevant details', 'Needs the wire "by Friday, no pressure"'];
+const QUIRK_GOOD_I = ['Sends the bad-news email first', 'Shows you the churn tab unprompted', 'Admits what they do not know', 'Introduces you to a customer who complains', 'Keeps a spreadsheet of their own mistakes'];
+const QUIRK_GOOD_F = ['Ships weekly and demos live', 'Recruited two ex-FAANG staff on nights and weekends', 'Answers questions before you finish asking', 'Talks to ten customers a week', 'Quiet, but every sentence contains a number'];
+const QUIRK_BAD_F = ['Third pivot in five months', 'Has not hired anyone since demo day', 'Delegates everything, including the pitch', 'Reads the deck off the slides', "Cofounder is 'on a spiritual sabbatical'"];
+const QUIRK_FLAVOR = ['Cold-brews coffee in the office bathroom', "Sleeps at the office, claims it's 'a choice'", 'Only communicates via voice memos', 'Wears the same hoodie as the logo', 'Has a very good dog named Vesting', 'Has not taken a vacation since 2019', 'Insists on walking meetings', 'Quotes Marcus Aurelius at least twice', 'Treats the cap table like a family tree', 'Brings a whiteboard to coffee'];
+
+// ---------- tuning constants ----------
+const AP_BASE = 10;
+const FEE_PCT = 0.02, CARRY_PCT = 0.20;
+const LIVING_COST_YR = 48000, CAR_COST_YR = 18000, ANALYST_YR = 36000, SCOUT_YR = 15000;
+const COST = {
+  screen: 1, meet: 1, dd: 1, ts: 1, send: 1, cold: 2, market: 1,
+  data: 1, refs: 1, cust: 2, tech: 1, bg: 1,
+  hqLocal: 2, hqRegion: 4, hqFar: 5,
+  help: { intro: 1, hire: 1, raise: 2, pivot: 2, cust: 1 },
+};
+const CASHCOST = { tech: 4000, bg: 2500, legalSafe: 2500, legalPriced: 9000 };
+
+const stg = k => STAGES[Math.min(5, Math.max(0, k))];
+const stageName = k => k <= 5 ? STAGES[Math.max(0, k)].short : 'Growth ' + (k - 4);
+
+// ============================================================================
+// SIM: game state, startups, cap tables, rounds, exits
+// ============================================================================
+let G = null;
+const setG = g => { G = g; };
+
+const STATS = ['F', 'P', 'B', 'T', 'I', 'X'];
+const STAT_NAMES = { F: 'Founder quality', P: 'Product-market fit', B: 'Burn discipline', T: 'Market timing', I: 'Integrity', X: 'Tech that works' };
+const STAT_SHORT = { F: 'Founder', P: 'PMF', B: 'Burn', T: 'Timing', I: 'Integrity', X: 'Tech' };
+
+function logMsg(text, kind) { G.log.push({ w: G.week, t: text, k: kind || 'info' }); if (G.log.length > 300) G.log.splice(0, 100); }
+function toast(text, kind) { G.toasts = G.toasts || []; G.toasts.push({ t: text, k: kind || 'info', born: G.week }); }
+function pushEvent(type, sid, data) { G.queue.push({ type, sid: sid || 0, data: data || {} }); }
+
+// ---------------------------------------------------------------- new game
+function newGame(o) {
+  const seed = String(o.seed || Math.floor(Math.random() * 900000 + 100000));
+  const size = o.size || 5e6;
+  const gp = Math.round(size * 0.02);
+  const g = {
+    v: 1, seed, rng: mkrng(hashStr(seed + ':world')), week: 0, ap: AP_BASE, apDebt: 0, over: false,
+    fundName: o.fundName || 'Bad Haircut Ventures', home: o.home || 'sf', size,
+    thesis: Object.assign({ smin: 0, smax: 1, sectors: ['ai', 'saas'], geo: 'region', check: 0.05 }, o.thesis || {}),
+    reservePct: o.reservePct != null ? o.reservePct : 0.35,
+    called: gp, fundCash: gp, invPaid: 0, dist: 0, carryPaid: 0, flows: [{ w: 0, a: -gp }], gp, reserveLeft: 0, feesPaid: 0, opexPaid: 0,
+    cash: 250000 - gp, car: false, staff: { analysts: 0, scouts: [] }, cashHist: [],
+    rep: 8, net: 6, lpTrust: 60, vaScore: 0.25, founderRel: 60,
+    startups: {}, nextId: 1, names: {}, deals: [], nextDeal: 1, hold: {}, ledger: [],
+    heat: {}, heatOu: {}, heatHist: [], macro: { regime: 'normal', since: 0 }, macroHist: [],
+    queue: [], log: [], toasts: [], hist: [], reports: [], recent: [], realizedLog: [],
+    stats: { sourced: 0, closed: 0, exits: 0, writeoffs: 0, frauds: 0, bestMoic: 0 },
+    coldSector: o.thesis && o.thesis.sectors ? o.thesis.sectors[0] : 'ai', quarterBoard: 0,
+    divisor: 1,
+  };
+  SECTORS.forEach(s => { g.heatOu[s.id] = 0; });
+  setG(g);
+  const D0 = dryPowder();
+  g.reserveLeft = Math.max(0, g.reservePct * D0);
+  SECTORS.forEach(s => { g.heat[s.id] = sectorHeatAt(s, 0, g.heatOu[s.id]); });
+  recordHistory();
+  logMsg(`${g.fundName} opens its doors. ${fm(size)} committed, ${fm(gp)} of it yours. Try not to lose it.`, 'good');
+  return g;
+}
+
+function sectorHeatAt(sec, w, ou) { return clamp(sec.amp * Math.sin(2 * Math.PI * (w / sec.period + sec.phase)) + ou, -1, 1); }
+
+// ---------------------------------------------------------------- fund money
+function weeksLeft() { return Math.max(0, FUND_WEEKS - G.week); }
+function annualFee() { return G.size * FEE_PCT; }
+function uncalled() { return G.size - G.called; }
+function dryPowder() { return uncalled() + G.fundCash - annualFee() / 52 * weeksLeft() - G.size * 0.01; }
+function generalPowder() { return dryPowder() - G.reserveLeft; }
+// spend money from the fund: idle cash (the GP commit) first, then call capital from LPs
+function callCapital(amt, kind) {
+  amt = Math.min(amt, Math.max(0, uncalled() + G.fundCash));
+  const fromCash = Math.min(G.fundCash, amt); G.fundCash -= fromCash;
+  const call = amt - fromCash;
+  if (call > 0) { G.called += call; G.flows.push({ w: G.week, a: -call }); }
+  if (kind === 'fee') G.feesPaid += amt; else if (kind === 'opex') G.opexPaid += amt; else if (kind === 'inv') G.invPaid += amt;
+  return amt;
+}
+function distribute(amt) {
+  if (amt <= 0) return;
+  G.dist += amt;
+  const carryDue = Math.max(0, CARRY_PCT * (G.dist - G.called) - G.carryPaid);
+  G.carryPaid += carryDue;
+  const net = amt - carryDue;
+  G.flows.push({ w: G.week, a: net });
+  G.cash += carryDue + net * (G.gp / G.size);
+  return { carry: carryDue, net };
+}
+
+// ---------------------------------------------------------------- knowledge
+function noiseMult() { return Math.pow(0.88, G.staff.analysts); }
+function onThesis(s) { return thesisFit(s).ok; }
+function fitMult(s) { return onThesis(s) ? 0.82 : 1.2; }
+function know(s, stat, obs, sigma) {
+  obs = clamp(obs, 0, 100);
+  const k = s.know[stat], v2 = sigma * sigma;
+  if (!k) { s.know[stat] = { m: obs, v: v2 }; return; }
+  const nv = 1 / (1 / k.v + 1 / v2);
+  k.m = nv * (k.m / k.v + obs / v2); k.v = nv;
+}
+function observe(s, stat, sigma, bias) {
+  const sg = sigma * noiseMult() * fitMult(s);
+  const obs = s.h[stat] + (bias || 0) + rg(G.rng, 0, sg);
+  know(s, stat, obs, sg);
+  return obs;
+}
+
+// ---------------------------------------------------------------- thesis
+function cityRelation(cityId) {
+  const h = CITY_BY_ID[G.home], c = CITY_BY_ID[cityId];
+  if (c.id === h.id) return 'local';
+  if (c.region === h.region) return 'region';
+  return 'far';
+}
+function thesisFit(s) {
+  const t = G.thesis, k = s.round ? s.round.stage : s.done + 1;
+  const stage = k >= t.smin && k <= t.smax;
+  const sector = t.sectors.includes(s.sector);
+  const rel = cityRelation(s.city);
+  const geo = t.geo === 'global' || (t.geo === 'region' && rel !== 'far') || (t.geo === 'local' && rel === 'local');
+  return { stage, sector, geo, ok: stage && sector && geo };
+}
+function driftLevel() {
+  if (!G.recent.length) return 0;
+  const n = G.recent.slice(-8);
+  return n.filter(x => x).length / n.length;
+}
+function biasFactor() { return clamp(1 - Math.max(0, driftLevel() - 0.2) * 1.2, 0.25, 1); }
+
+// ---------------------------------------------------------------- startup generation
+function invented(r) {
+  const C = 'bdfgklmnprstvz', V = 'aeiou'; let s = ''; const n = ri(r, 2, 3);
+  for (let i = 0; i < n; i++) s += C[ri(r, 0, C.length - 1)] + V[ri(r, 0, V.length - 1)];
+  return s[0].toUpperCase() + s.slice(1) + (rc(r, 0.4) ? rp(r, ['x', 'n', 'ly', 'a', 'io']) : '');
+}
+function genName(r, sec) {
+  for (let t = 0; t < 30; t++) {
+    const m = rf(r); let nm;
+    if (m < 0.45) nm = rp(r, sec.pre) + rp(r, sec.suf);
+    else if (m < 0.7) nm = rp(r, sec.pre) + ' ' + rp(r, ['Labs', 'Systems', 'Co', 'Group', 'Works', 'Collective', 'Analytics']);
+    else nm = invented(r);
+    nm = nm.replace(/^(.)(.*)$/, (a, b, c) => b.toUpperCase() + c);
+    if (!G.names[nm]) { G.names[nm] = 1; return nm; }
+  }
+  const nm = invented(r) + ri(r, 2, 99); G.names[nm] = 1; return nm;
+}
+function pickQuirk(r, h) {
+  const m = rf(r);
+  if (m < 0.22) return rc(r, 0.5 + (50 - h.I) / 120) && h.I < 55 ? rp(r, QUIRK_BAD_I) : (h.I > 70 ? rp(r, QUIRK_GOOD_I) : rp(r, QUIRK_FLAVOR));
+  if (m < 0.40) return h.F > 62 && rc(r, 0.75) ? rp(r, QUIRK_GOOD_F) : (h.F < 42 && rc(r, 0.75) ? rp(r, QUIRK_BAD_F) : rp(r, QUIRK_FLAVOR));
+  if (m < 0.47) return rp(r, rc(r, 0.5) ? QUIRK_BAD_I : QUIRK_BAD_F);
+  return rp(r, QUIRK_FLAVOR);
+}
+
+function pickCity(r, bias) {
+  const home = CITY_BY_ID[G.home];
+  const x = rf(r);
+  const pLocal = 0.5 + 0.18 * (1 - bias), pReg = 0.25;
+  if (x < pLocal) return home.id;
+  const same = CITIES.filter(c => c.region === home.region && c.id !== home.id);
+  if (x < pLocal + pReg && same.length) return rp(r, same).id;
+  const other = CITIES.filter(c => c.region !== home.region);
+  return rp(r, other).id;
+}
+
+function genStartup(o) {
+  const id = G.nextId++;
+  const r = mkrng(hashStr(G.seed + ':s' + id));
+  const sec = SECTOR_BY_ID[o.sector];
+  const Q = clamp(o.q, 4, 97);
+  const h = {};
+  h.F = clamp(Q + rg(r, 0, 13), 3, 98);
+  h.P = clamp(Q + rg(r, 0, 15), 3, 98);
+  h.T = clamp(50 + 0.35 * (Q - 50) + rg(r, 0, 17) + 8 * G.heat[o.sector], 3, 98);
+  h.B = clamp(rg(r, 52, 18) + 0.1 * (Q - 50), 3, 98);
+  h.X = clamp(Q + rg(r, 0, 17), 3, 98);
+  const fraud = rc(r, sec.fraud * (Q < 40 ? 1.6 : Q > 70 ? 0.35 : 1));
+  h.I = fraud ? rr(r, 3, 20) : clamp(rg(r, 62 + 0.2 * (Q - 50), 16), 25, 98);
+  if (fraud) { h.P = Math.min(h.P, rr(r, 8, 42)); }
+  const s = {
+    id, name: genName(r, sec), sector: o.sector, city: o.city || pickCity(r, 1),
+    founder: { name: rp(r, FIRST) + ' ' + rp(r, LAST) }, q: Q, h, fraud,
+    breakout: h.P >= 82 && h.F >= 68 && h.T >= 58,
+    pitch: rp(r, sec.what) + ' for ' + rp(r, sec.who),
+    rs: r, born: G.week, status: 'private', know: {},
+    done: -1, rounds: [], cap: { founders: 8e6, pool: 1e6, inv: [] }, safes: [], lowSafeCap: Infinity,
+    mrr: 0, expense: 0, cash: 0, gMod: 0, dress: 0, distress: 1, fails: 0, round: null, lastRaiseW: G.week, pivotW: -99,
+    saleBoost: 1, shock: 0, stallUntil: 0,
+  };
+  s.founder.quirk = pickQuirk(r, h);
+  s.potential = 12e6 * Math.exp(0.095 * (0.45 * h.P + 0.25 * h.T + 0.3 * h.F - 50)) * Math.exp(rg(r, 0, 0.5)) * (s.breakout ? 2.6 : 1);
+  s.dress = fraud ? rr(r, 0.35, 0.8) : Math.max(0, (100 - h.I) / 100 * rr(r, 0.05, 0.25));
+  setupFinancials(s, o.stage);
+  openRound(s, o.stage, o.fast);
+  G.startups[id] = s;
+  return s;
+}
+
+function sectorHeat(id) { return G.heat[id] || 0; }
+
+function setupFinancials(s, r0) {
+  const r = s.rs, h = s.h;
+  // backfill earlier rounds so the cap table makes sense
+  for (let k = 0; k < r0; k++) {
+    const st = stg(k);
+    const pre = st.pre * rr(r, 0.75, 1.5) * Math.pow(s.q / 50, 0.8), raise = st.raise * rr(r, 0.8, 1.2);
+    const post = pre + raise;
+    const poolPct = 0.10;
+    const N = s.cap.founders + s.cap.pool + sum(s.cap.inv, x => x.shares);
+    let postFD = (N - s.cap.pool) / (1 - poolPct - raise / post);
+    if (poolPct * postFD < s.cap.pool) postFD = N / (1 - raise / post);
+    const pps = post / postFD, newInv = raise / pps;
+    s.cap.pool = Math.max(s.cap.pool, poolPct * postFD);
+    s.cap.inv.push({ name: STAGES[k].short + ' investors', shares: newInv });
+    s.rounds.push({ stage: k, pre, post, raise, pps, week: G.week - 60 + k * 10, lead: 'Earlier investors', down: false });
+    s.done = k;
+  }
+  if (r0 === 0) {
+    s.mrr = rr(r, 800, 5500);
+    const net = STAGES[0].burnMo * rr(r, 0.6, 1.3);
+    s.expense = s.mrr + net; s.cash = net * rr(r, 3.2, 6.5);
+  } else {
+    const arr = STAGES[r0].bench * Math.exp((h.P - 52) / 26) * rr(r, 0.65, 1.2);
+    s.mrr = arr / 12;
+    const net = STAGES[r0].burnMo * rr(r, 0.7, 1.3) * (1.25 - h.B / 200);
+    s.expense = s.mrr + net; s.cash = net * rr(r, 3.2, 6.5);
+  }
+}
+
+function perceivedRatio(s, k) {
+  const h = s.h;
+  const team = Math.exp((0.45 * h.F + 0.4 * h.P + 0.15 * h.T - 50) / 22);
+  if (k === 0) return team;
+  const rev = Math.max(0.02, s.mrr * 12 * (1 + s.dress * 0.7) / stg(k).bench);
+  return k === 1 ? Math.sqrt(rev * team) : rev;
+}
+function fairPre(s, k) {
+  const st = stg(k);
+  const r = perceivedRatio(s, k);
+  const em = Math.pow(SECTOR_BY_ID[s.sector].em, 0.6);
+  return st.pre * Math.pow(clamp(r, 0.25, 4), 0.8) * (1 + 0.3 * sectorHeat(s.sector)) * MACRO[G.macro.regime].val * em;
+}
+
+// open a funding round for a startup (the thing sitting in your pipeline)
+function openRound(s, k, fast) {
+  const r = s.rs, st = stg(k);
+  const ratio = perceivedRatio(s, k);
+  const fair = fairPre(s, k);
+  const greed = rr(r, 1.0, 1.28);
+  const raise = st.raise * Math.pow(clamp(ratio, 0.5, 2), 0.4) * rr(r, 0.9, 1.15);
+  const safeP = k === 0 ? 0.65 : k === 1 ? 0.35 : 0;
+  const safe = rc(r, safeP);
+  const [wa, wb] = st.weeksOpen;
+  s.round = {
+    stage: k, fair, ask: fair * greed, raise, safe, poolPct: 0.10, greed,
+    start: G.week, end: G.week + (fast ? ri(r, 2, 3) : ri(r, wa, wb)), signal: 0, prep: 0, mySlice: 0, taken: false,
+    rivals: makeRivals(s, k, fair, greed),
+  };
+  if (safe) s.round.ask = s.round.ask * 1.05; // cap is quoted post-money-ish
+  return s.round;
+}
+
+function marketQ(s) { return 0.4 * s.h.F + 0.4 * s.h.P + 0.2 * s.h.T; }
+function makeRivals(s, k, fair, greed) {
+  const r = s.rs;
+  const qm = marketQ(s) + rg(r, 0, 4);
+  const stageF = [0.7, 1.0, 1.2, 1.3, 1.3, 1.3, 1.3, 1.3][k];
+  const lam = clamp((qm - 38) / 16, 0, 3.2) * (1 + 0.35 * sectorHeat(s.sector)) * stageF * (s.fraud ? 0.5 : 1);
+  const n = Math.min(4, rpois(r, lam));
+  const out = [];
+  const elig = RIVALS.filter(f => Math.min(5, k) >= f.stages[0] && Math.min(5, k) <= f.stages[1]);
+  for (let i = 0; i < n && elig.length; i++) {
+    const f = rw(r, elig.filter(e => !out.find(o => o.id === e.id)), e => (e.sectors ? (e.sectors.includes(s.sector) ? 2.2 : 0.4) : 1) * (0.5 + e.brand / 100));
+    if (!f) break;
+    const prem = fair * (1 + f.pay + rg(r, 0, 0.05));
+    const u = (f.brand - 50) / 50 + 3.2 * Math.log(prem / (fair * greed)) + f.friendly * 0.8 + f.speed * 0.4 + f.va * 0.4 + rg(r, 0, 0.22);
+    out.push({ id: f.id, name: f.name, u, pre: prem });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- cap table math
+function fd(s) {
+  let t = s.cap.founders + s.cap.pool;
+  for (const i of s.cap.inv) t += i.shares;
+  const h = G.hold[s.id];
+  if (h) for (const tr of h.tr) t += tr.shares || 0;
+  return t;
+}
+function prefTotal(s) { return Math.max(1, sum(s.rounds, x => x.raise) + sum(s.safes, x => x.invested)); }
+function lastPost(s) { return s.rounds.length ? s.rounds[s.rounds.length - 1].post : 0; }
+
+// price + close a round. o: {pre, raise, lead, poolPct, mine:[{invested, pref, anti, board, prorata, safe, cap, mfn, disc, kind}] , safeRound}
+function closeRound(s, o) {
+  const k = s.round ? s.round.stage : s.done + 1;
+  const w = G.week;
+  const h0 = G.hold[s.id];
+  if (o.safeRound) {
+    // SAFE round: money in, valuation cap recorded; converts at next priced round
+    const cap = o.pre;
+    s.cash += o.raise;
+    const mineInv = sum(o.mine || [], t => t.invested);
+    const otherInv = Math.max(0, o.raise - mineInv);
+    if (otherInv > 0) s.safes.push({ who: 'other', invested: otherInv, cap, disc: rc(s.rs, 0.5) ? 0.2 : 0, mfn: false, name: o.lead });
+    for (const t of (o.mine || [])) {
+      const tr = addTranche(s, { kind: 'safe', invested: t.invested, cap, disc: t.disc || 0, mfn: !!t.mfn, pref: '1x', anti: 'none' });
+      s.safes.push({ who: 'me', tid: tr.id, invested: t.invested, cap, disc: t.disc || 0, mfn: !!t.mfn });
+    }
+    s.lowSafeCap = Math.min(s.lowSafeCap, cap);
+    s.rounds.push({ stage: k, pre: cap, post: cap, raise: o.raise, pps: 0, week: w, lead: o.lead, down: false, safe: true });
+    s.done = k;
+  } else {
+    const pre = o.pre, raise = o.raise, post = pre + raise;
+    // convert safes / notes
+    const Nbase = s.cap.founders + s.cap.pool + sum(s.cap.inv, x => x.shares) + (h0 ? sum(h0.tr, t => t.shares || 0) : 0);
+    let safeShares = 0; const conv = [];
+    for (const sf of s.safes) {
+      const capV = Math.min(sf.cap || Infinity, sf.mfn ? s.lowSafeCap : Infinity);
+      const convVal = Math.min(capV, pre * (1 - (sf.disc || 0)));
+      const sh = sf.invested / convVal * Nbase;
+      safeShares += sh; conv.push([sf, sh]);
+    }
+    const N = Nbase + safeShares;
+    const poolPct = o.poolPct != null ? o.poolPct : 0.10;
+    let postFD = (N - s.cap.pool) / (1 - poolPct - raise / post);
+    if (poolPct * postFD < s.cap.pool) postFD = N / (1 - raise / post);
+    const pps = post / postFD;
+    const prevPps = s.rounds.length ? lastPps(s) : 0;
+    const down = prevPps > 0 && pps < prevPps * 0.98;
+    // convert
+    for (const [sf, sh] of conv) {
+      if (sf.who === 'me') {
+        const tr = h0.tr.find(t => t.id === sf.tid);
+        if (tr) { tr.shares = sh; tr.cp = tr.invested / sh; tr.converted = true; }
+      } else s.cap.inv.push({ name: sf.name || 'SAFE holders', shares: sh });
+    }
+    s.safes = [];
+    // anti-dilution on my earlier priced tranches
+    if (down && h0) {
+      const A = N, newShares = raise / pps;
+      for (const t of h0.tr) {
+        if (!t.shares || t.kind === 'safe' || t.anti === 'none' || !t.cp) continue;
+        if (pps >= t.cp) continue;
+        let cp2;
+        if (t.anti === 'ratchet') cp2 = pps;
+        else { const B = raise / t.cp; cp2 = t.cp * (A + B) / (A + newShares); }
+        const ns = t.invested / cp2;
+        if (ns > t.shares) { t.adjust = (t.adjust || 0) + (ns - t.shares); t.shares = ns; t.cp = cp2; s.antiTriggered = true; }
+      }
+    }
+    // pool top-up
+    const poolAdd = Math.max(0, poolPct * postFD - s.cap.pool);
+    s.cap.pool += poolAdd;
+    // new investors
+    let myShares = 0;
+    for (const t of (o.mine || [])) {
+      const tr = addTranche(s, { kind: t.kind || 'priced', invested: t.invested, pps, cp: pps, pref: t.pref || '1x', anti: t.anti || 'wa' });
+      tr.shares = t.invested / pps; myShares += tr.shares;
+    }
+    s.cap.inv.push({ name: o.lead, shares: Math.max(0, raise / pps - myShares) });
+    s.cash += raise;
+    s.rounds.push({ stage: k, pre, post, raise, pps, week: w, lead: o.lead, down });
+    s.done = k;
+    s.lastDown = down;
+  }
+  s.round = null; s.fails = 0; s.lastRaiseW = w; s.distress = 1;
+  // reset burn plan
+  const plan = 12 + s.h.B / 100 * 12;
+  s.expense = s.mrr + Math.max(stg(k).burnMo * 0.5, s.cash / plan);
+  s.stallUntil = 0;
+  return s.rounds[s.rounds.length - 1];
+}
+function lastPps(s) { for (let i = s.rounds.length - 1; i >= 0; i--) if (s.rounds[i].pps > 0) return s.rounds[i].pps; return 0; }
+
+function addTranche(s, t) {
+  let h = G.hold[s.id];
+  if (!h) {
+    h = G.hold[s.id] = { sid: s.id, tr: [], invested: 0, realized: 0, board: false, prorata: false, lead: false, rel: 60, status: 'active', since: G.week, helpCd: {}, nextTr: 1, lockUntil: 0, exitW: 0, spent: {}, diligence: 0 };
+  }
+  t.id = h.nextTr++; t.w = G.week; t.shares = t.shares || 0;
+  h.tr.push(t); h.invested += t.invested;
+  return t;
+}
+
+// ---------------------------------------------------------------- holdings valuation
+function equityMark(s) {
+  if (s.status === 'dead') return 0;
+  if (s.status === 'public') return s.mcap;
+  if (!s.rounds.length) return 0;
+  let v = lastPost(s) * s.distress;
+  // stale + profitable → mark to ARR model
+  const stale = G.week - s.lastRaiseW;
+  if (stale > 70 && s.mrr > s.expense * 0.9) v = Math.max(v, s.mrr * 12 * 10 * MACRO[G.macro.regime].exit);
+  return v;
+}
+function ownPct(s, h) {
+  h = h || G.hold[s.id]; if (!h) return 0;
+  const f = fd(s);
+  // converted shares + a post-money-style estimate for SAFEs / notes that have not converted yet
+  return sum(h.tr, t => t.shares || 0) / f + sum(h.tr.filter(t => !t.shares), t => t.invested / Math.max(1, t.cap && isFinite(t.cap) ? t.cap : (lastPost(s) || t.invested * 10) * 0.8));
+}
+function holdingMark(h) {
+  const s = G.startups[h.sid];
+  if (!s || h.status !== 'active') return 0;
+  if (s.status === 'dead') return 0;
+  const eq = equityMark(s), f = fd(s);
+  let v = 0;
+  for (const t of h.tr) {
+    if (t.shares) v += t.shares / f * eq;
+    else v += t.invested * (s.rounds.length && t.kind === 'safe' ? Math.max(1, lastPost(s) / t.cap * 0.9) : 1) * s.distress;
+  }
+  return v;
+}
+function holdingCost(h) { return h.invested; }
+
+// payout for a holding if company sold for equity value EV
+function exitPayout(s, h, EV) {
+  const pt = prefTotal(s), f = fd(s);
+  let pay = 0;
+  for (const t of h.tr) {
+    if (!t.shares) { // unconverted SAFE / note
+      pay += EV <= pt ? EV * t.invested / pt : t.invested * Math.max(1, EV / (t.cap || lastPost(s) || EV));
+      continue;
+    }
+    const own = t.shares / f;
+    if (EV <= pt) pay += EV * t.invested / pt;
+    else if (t.pref === 'part') pay += t.invested + own * (EV - pt);
+    else pay += Math.max(t.invested, own * EV);
+  }
+  return pay;
+}
+function arr(s) { return s.mrr * 12; }
+
+// ---------------------------------------------------------------- misc helpers
+function dealsOf(sid) { return G.deals.filter(d => d.sid === sid && d.status === 'open'); }
+function endDeal(d, status, why) { d.status = status; d.why = why; d.endW = G.week; if (d.col >= 1 && status !== 'closed') { addLedger(d); } }
+function addLedger(d) {
+  const s = G.startups[d.sid]; if (!s) return;
+  if (G.ledger.find(l => l.sid === d.sid)) return;
+  G.ledger.push({ sid: d.sid, name: s.name, sector: s.sector, w: G.week, stage: d.stage, ask: d.ask, why: d.why || 'passed', pre: s.round ? s.round.ask : 0 });
+}
+function recordHistory() {
+  const m = fundMetrics();
+  G.hist.push({ w: G.week, tvpi: m.tvpi, dpi: m.dpi, nav: m.nav, paid: m.paidIn, dist: G.dist });
+}
+
+function acqhireEV(s) {
+  const M = MACRO[G.macro.regime];
+  return Math.max(s.cash * 0.6, headcount(s) * rr(s.rs, 0.05e6, 0.28e6) * M.val + arr(s) * 0.6);
+}
+
+// ============================================================================
+// WORLD: weekly engine — startups, rounds, crises, exits, sourcing, macro
+// ============================================================================
+
+function growthMo(s) {
+  const h = s.h, k = Math.min(s.done + 1, 5);
+  let g = ((h.P - 30) / 100 * 0.21 + (h.F - 50) / 100 * 0.04 + (h.T - 50) / 100 * 0.05) * STAGES[k].damp + 0.015 * sectorHeat(s.sector) + s.gMod;
+  if (s.breakout) g *= 1.18;
+  if (g > 0) g *= Math.max(0.03, 1 - s.mrr * 12 / s.potential) / (1 + 0.25 * Math.sqrt(s.mrr * 12 / 8e6)); // market ceiling + law of large numbers
+  if (s.fraud) g = Math.min(g, 0.01);
+  return g;
+}
+function netBurn(s) { return s.expense - s.mrr; }
+function runwayMo(s) { const nb = netBurn(s); return nb > 1 ? s.cash / nb : 99; }
+function headcount(s) { return Math.max(2, Math.round(s.expense / 14500)); }
+
+function stepStartup(s) {
+  const r = s.rs;
+  if (s.status === 'public') { stepPublic(s); return; }
+  if (s.status !== 'private') return;
+  const h = G.hold[s.id], held = h && h.status === 'active';
+  // operating
+  s.gMod += -0.05 * s.gMod + rg(r, 0, 0.006);
+  let g = growthMo(s);
+  if (rc(r, 0.0025)) s.gMod -= rr(r, 0.015, 0.04); // a bad quarter: competitor, churn, reorg
+  if (G.week < s.stallUntil) g = Math.min(g, 0);
+  const gw = g / 4.345 + rg(r, 0, 0.01);
+  if (s.mrr < 400 && s.done < 1) s.mrr += rr(r, 0, 60) * Math.max(0, g * 8); // pre-revenue trickle
+  else s.mrr = Math.max(0, s.mrr * (1 + gw));
+  if (gw > 0) s.expense *= 1 + (s.mrr > s.expense * 0.8 ? 0.9 : 0.5) * gw;
+  s.expense = Math.max(s.expense, s.mrr * 0.35);
+  s.cash -= netBurn(s) / 4.345;
+  // fundraising state machine
+  if (s.round) {
+    if (!s.round.taken && G.week >= s.round.end) resolveRound(s);
+  } else if (s.done < 8) {
+    const rw_ = runwayMo(s);
+    const strong = perceivedRatio(s, s.done + 1) > 1.6 && rw_ < 15 && rc(r, 0.03);
+    if (rw_ < 7 || strong) startRaise(s);
+  }
+  if (s.status !== 'private') return;
+  if (s.cash <= 0 && !s.round) { collapse(s, 'ran out of cash'); return; }
+  if (s.cash <= -netBurn(s) && s.round) { collapse(s, 'ran out of cash mid-raise'); return; }
+  // random hazards
+  if (!held && rc(r, 0.0004)) { collapse(s, 'imploded'); return; }
+  // exit interest
+  if (s.done >= 2) exitInterest(s, h, held);
+  // fraud reveal
+  if (held && h.fraudAt && G.week >= h.fraudAt && !h.fraudDone) {
+    h.fraudDone = true; pushEvent('fraud', s.id);
+  }
+}
+
+function startRaise(s) {
+  const k = s.done + 1;
+  if (k > 8) return;
+  openRound(s, k, false);
+  const h = G.hold[s.id];
+  if (h && h.status === 'active') {
+    const rd = s.round;
+    if (h.prorata || h.rel >= 55) pushEvent('followon', s.id, { k });
+    else logMsg(`${s.name} is raising ${stageName(k)} — the founder didn't offer you an allocation.`, 'warn');
+  } else {
+    const l = G.ledger.find(x => x.sid === s.id);
+    if (l && !G.deals.some(d => d.sid === s.id && d.status === 'open') && rc(G.rng, 0.6) && s.status === 'private') {
+      const d = makeDeal(s, 'resurface'); d.col = 0;
+      logMsg(`${s.name} (you passed earlier) is back, raising ${stageName(k)}.`, 'info');
+    }
+  }
+}
+
+function resolveRound(s) {
+  const rd = s.round, k = rd.stage, r = s.rs;
+  const M = MACRO[G.macro.regime];
+  const ratio = perceivedRatio(s, k);
+  const z = 3 * Math.log(Math.max(0.05, ratio)) + 1.0 + 0.9 * sectorHeat(s.sector) + M.raise + rd.signal + rd.prep + 0.25 * rd.rivals.length - 0.7 * s.fails - (rd.rivals.length ? 0 : 0.3);
+  const h = G.hold[s.id], held = h && h.status === 'active';
+  if (rf(r) >= sigmoid(z)) { failRaise(s, ratio); return; }
+  let pre = fairPre(s, k) * rr(r, 0.93, 1.1);
+  if (ratio < 0.6 && s.rounds.length) pre = Math.min(pre, lastPost(s) * rr(r, 0.55, 0.9));
+  if (rd.safe) pre *= 1.05;
+  const best = rd.rivals.slice().sort((a, b) => b.u - a.u)[0];
+  const lead = best ? best.name : (held ? 'Insider-led' : 'Strategic angels');
+  const mine = [];
+  if (held && rd.mySlice > 0 && !rd.safe) {
+    const amt = payFollowOn(rd.mySlice);
+    if (amt > 0) mine.push({ invested: amt, pref: '1x', anti: 'wa' });
+  } else if (held && rd.mySlice > 0 && rd.safe) {
+    const amt = payFollowOn(rd.mySlice);
+    if (amt > 0) mine.push({ invested: amt, disc: 0 });
+  }
+  const prevMark = held ? holdingMark(h) : 0;
+  const rec = closeRound(s, { pre, raise: rd.raise, lead, poolPct: 0.10, mine, safeRound: rd.safe });
+  if (best) { G.rivalWins = G.rivalWins || {}; G.rivalWins[best.id] = (G.rivalWins[best.id] || 0) + 1; }
+  // pipeline fallout
+  for (const d of dealsOf(s.id)) endDeal(d, 'lost', `${lead} closed the round`);
+  if (held) {
+    const up = !rec.down;
+    const mark = holdingMark(h);
+    logMsg(`${s.name} closed ${stageName(k)}${rec.safe ? ' (SAFE)' : ''}: ${fm(rec.raise)} at ${fm(rec.post)} post, led by ${lead}.${rec.down ? ' DOWN ROUND.' : ''}`, rec.down ? 'bad' : 'good');
+    if (up) { G.rep = Math.min(100, G.rep + (h.lead ? 0.35 : 0.15)); if (mark > h.invested * 3) G.net += 0.2; }
+    if (rec.down && s.antiTriggered) { s.antiTriggered = false; pushEvent('antidil', s.id); }
+    if (mine.length) G.net += 0.5;
+  }
+  s.stallUntil = 0;
+}
+
+function payFollowOn(amt) {
+  amt = Math.min(amt, Math.max(0, uncalled() + G.fundCash - annualFee() / 52 * weeksLeft() * 0.5));
+  if (amt <= 0) return 0;
+  const fromRes = Math.min(G.reserveLeft, amt);
+  G.reserveLeft -= fromRes;
+  callCapital(amt, 'inv');
+  return amt;
+}
+
+function failRaise(s, ratio) {
+  s.round = null; s.fails++;
+  const h = G.hold[s.id], held = h && h.status === 'active';
+  for (const d of dealsOf(s.id)) endDeal(d, 'lost', 'round fell apart');
+  const rw_ = runwayMo(s);
+  if (rw_ > 3.2 && s.fails < 3) { // try again shortly
+    s.retryOk = true; return;
+  }
+  if (held) {
+    if (ratio > 0.3 && s.fails < 3 && rc(G.rng, 0.6)) pushEvent('downround', s.id, { ratio });
+    else pushEvent('runway', s.id);
+  } else npcCrisis(s, ratio);
+}
+
+function npcCrisis(s, ratio) {
+  const r = s.rs;
+  if (s.fails < 3 && rc(r, 0.4)) { // insider bridge
+    s.cash += s.expense * 4; s.distress = 0.7; s.stallUntil = G.week + 4; return;
+  }
+  if (rc(r, 0.45)) { npcSale(s, acqhireEV(s), 'acqui-hired'); return; }
+  collapse(s, 'ran out of runway');
+}
+function npcSale(s, ev, why) {
+  s.status = 'acquired'; s.exitEV = ev; s.exitW = G.week; s.exitWhy = why;
+  for (const d of dealsOf(s.id)) endDeal(d, 'lost', why);
+}
+
+// a company dies
+function collapse(s, why) {
+  const h = G.hold[s.id];
+  s.status = 'dead'; s.deadW = G.week; s.deadWhy = why; s.round = null;
+  for (const d of dealsOf(s.id)) endDeal(d, 'lost', 'company ' + why);
+  if (h && h.status === 'active') {
+    const EV = Math.max(0, s.cash) * 0.4;
+    const pay = exitPayout(s, h, EV);
+    writeOff(h, pay, why);
+  }
+}
+function writeOff(h, recovered, why) {
+  const s = G.startups[h.sid];
+  if (recovered > 0) distribute(recovered);
+  h.realized += recovered; h.status = 'written-off'; h.exitW = G.week;
+  G.stats.writeoffs++;
+  G.rep = Math.max(0, G.rep - 0.25);
+  const loss = h.invested - recovered;
+  logMsg(`${s.name} ${why || 'shut down'}. You lose ${fm(loss)} (${recovered > 0 ? 'recovered ' + fm(recovered) : 'nothing recovered'}).`, 'bad');
+  G.realizedLog.push({ sid: h.sid, name: s.name, invested: h.invested, got: h.realized, w: G.week, kind: 'writeoff' });
+}
+
+// ------------------------------------------------------------------ exits
+function exitMult(s) {
+  const M = MACRO[G.macro.regime];
+  const base = [4, 6, 9, 10.5, 11.5, 12.5][Math.min(5, s.done)];
+  return base * Math.pow(SECTOR_BY_ID[s.sector].em, 0.7) * M.exit * (1 + 0.25 * sectorHeat(s.sector)) * (s.breakout ? 1.25 : 1);
+}
+function exitInterest(s, h, held) {
+  const r = s.rs, a = arr(s);
+  if (a < 0.5e6) return;
+  // IPO window
+  const M = MACRO[G.macro.regime];
+  if (s.done >= 3 && a > 35e6 && M.ipo > 0) {
+    const p = M.ipo * 0.02 * clamp(a / 60e6, 0.5, 2) * (1 + sectorHeat(s.sector));
+    if (rc(r, p)) {
+      const ev = a * 14 * M.exit * rr(r, 0.85, 1.3) * (s.breakout ? 1.3 : 1) * (1 + 0.3 * sectorHeat(s.sector));
+      if (held) { if (!pendingOffer(s.id)) pushEvent('exitoffer', s.id, { kind: 'ipo', ev, cash: false }); }
+      else goPublic(s, ev, 0.04);
+      return;
+    }
+  }
+  // M&A
+  const p = 0.0022 * (1 + Math.max(0, sectorHeat(s.sector))) * (a > 3e6 ? 1.4 : 0.7) * (s.done >= 4 ? 1.3 : 1);
+  if (rc(r, p)) {
+    const ev = a * exitMult(s) * rr(r, 0.85, 1.3);
+    if (ev < 0.6 * equityMark(s)) return;
+    if (held) {
+      if (pendingOffer(s.id)) return;
+      const cash = rc(r, 0.62), opposes = rc(r, 0.3);
+      if (opposes && !h.board) { logMsg(`An acquirer approached ${s.name} at ${fm(ev)}; the founder turned it down. (A board seat would have given you a vote.)`, 'warn'); return; }
+      pushEvent('exitoffer', s.id, { kind: 'ma', ev, cash, opposes });
+    } else if (rc(r, 0.6)) npcSale(s, ev, 'acquired');
+  }
+}
+function pendingOffer(sid) { return G.queue.some(e => e.type === 'exitoffer' && e.sid === sid); }
+
+function goPublic(s, ev, vol) {
+  s.status = 'public'; s.mcap = ev; s.ipoW = G.week; s.vol = vol || 0.04; s.mcap0 = ev;
+  for (const d of dealsOf(s.id)) endDeal(d, 'lost', 'went public');
+  s.round = null;
+}
+function stepPublic(s) {
+  const M = MACRO[G.macro.regime];
+  const r = G.rng;
+  s.mcap *= Math.exp(M.drift + 0.0006 * (s.q - 50) / 50 + rg(r, 0, s.vol || 0.04));
+  const h = G.hold[s.id];
+  if (!h || h.status !== 'active') { if (G.week - (s.ipoW || 0) > 30) s.status = 'exited'; }
+}
+function publicValue(h) { const s = G.startups[h.sid]; return s.mcap * ownPct(s, h) * (h.stockDeal ? 1 : 1); }
+
+// realise a holding (accept an acquisition offer or sale)
+function sellHolding(h, EV, label) {
+  const s = G.startups[h.sid];
+  const pay = exitPayout(s, h, EV);
+  distribute(pay);
+  h.realized += pay; h.status = 'exited'; h.exitW = G.week;
+  s.status = 'acquired'; s.exitEV = EV; s.exitW = G.week;
+  finishExit(h, pay, label);
+  return pay;
+}
+function finishExit(h, pay, label) {
+  const s = G.startups[h.sid];
+  const moic = h.realized / Math.max(1, h.invested);
+  G.stats.exits++; G.stats.bestMoic = Math.max(G.stats.bestMoic, moic);
+  if (moic > 10) G.rep = Math.min(100, G.rep + 5); else if (moic > 3) G.rep = Math.min(100, G.rep + 2); else if (moic > 1.2) G.rep = Math.min(100, G.rep + 0.7);
+  G.realizedLog.push({ sid: h.sid, name: s.name, invested: h.invested, got: h.realized, w: G.week, kind: label || 'exit' });
+  logMsg(`${label || 'Exit'}: ${s.name} — ${fm(h.invested)} → ${fm(h.realized)} (${fx(moic, 1)}).`, moic >= 1 ? 'good' : 'bad');
+  for (const d of dealsOf(s.id)) endDeal(d, 'lost', 'sold');
+}
+
+// ------------------------------------------------------------------ deals
+function makeDeal(s, channel) {
+  const d = { id: G.nextDeal++, sid: s.id, col: 0, status: 'open', channel, w0: G.week, movedW: -1, tools: {}, notes: [], stage: s.round ? s.round.stage : s.done + 1, ask: s.round ? s.round.ask : 0, ts: null, marketChecked: false, hq: {}, cust: 0 };
+  G.deals.push(d); G.stats.sourced++;
+  return d;
+}
+function genQ(channel) {
+  switch (channel) {
+    case 'referral': return rg(G.rng, 62, 11);
+    case 'scout': return rg(G.rng, 55, 12);
+    case 'cold': return rg(G.rng, 40, 15);
+    case 'hot': return rg(G.rng, 82, 5);
+    default: return rg(G.rng, 44, 14);
+  }
+}
+const STAGE_W = [0.36, 0.34, 0.17, 0.08, 0.035, 0.015];
+function sourceDeal(channel, opts) {
+  opts = opts || {};
+  const t = G.thesis, bias = biasFactor();
+  let sector = opts.sector;
+  if (!sector) {
+    if (rc(G.rng, 0.5 * bias) && t.sectors.length) sector = rp(G.rng, t.sectors);
+    else sector = rw(G.rng, SECTORS, x => 1 + Math.max(-0.6, sectorHeat(x.id))).id;
+  }
+  let stage = opts.stage;
+  if (stage == null) {
+    if (rc(G.rng, (channel === 'cold' ? 0.8 : 0.55) * bias)) stage = ri(G.rng, t.smin, t.smax);
+    else stage = rw(G.rng, [0, 1, 2, 3, 4, 5], i => STAGE_W[i]);
+  }
+  let city = opts.city;
+  if (!city) {
+    if (t.geo === 'local' && rc(G.rng, 0.35 * bias)) city = G.home;
+    else if (t.geo === 'region' && rc(G.rng, 0.3 * bias)) { const same = CITIES.filter(c => c.region === CITY_BY_ID[G.home].region); city = rp(G.rng, same).id; }
+    else city = pickCity(G.rng, bias);
+  }
+  const q = opts.q != null ? opts.q : genQ(channel);
+  const s = genStartup({ q, sector, stage, city, fast: channel === 'hot' });
+  if (channel === 'hot') { // guarantee competition
+    const f = RIVALS.filter(x => stage >= x.stages[0] && stage <= x.stages[1])[0];
+    if (f && s.round.rivals.length < 2) { const fair = s.round.fair; s.round.rivals.push({ id: f.id, name: f.name, u: (f.brand - 50) / 50 + 3.2 * Math.log(1 + f.pay) - 0.1 + f.friendly * 0.8 + f.speed * 0.4 + f.va * 0.4, pre: fair * (1 + f.pay) }); }
+  }
+  const d = makeDeal(s, channel);
+  if (channel === 'referral') d.referrer = rp(G.rng, ['a co-investor', 'a portfolio founder', 'an old colleague', 'an LP', 'a scout in your network', 'your barber (really)']);
+  return d;
+}
+
+function sourcingWeek() {
+  const nIn = rpois(G.rng, 2.1 + G.rep / 30);
+  for (let i = 0; i < nIn; i++) sourceDeal('inbound');
+  const refP = clamp(0.12 + G.net / 160 + (G.founderRel - 50) / 400, 0.05, 0.7);
+  if (rc(G.rng, refP)) sourceDeal('referral');
+  if (G.net > 40 && rc(G.rng, 0.12)) sourceDeal('referral');
+  for (const sec of G.staff.scouts) if (rc(G.rng, 0.35)) sourceDeal('scout', { sector: sec });
+  // hot deal
+  if (G.week > 6 && rc(G.rng, 0.012 + G.rep / 4000)) {
+    const d = sourceDeal('hot', { stage: clamp(ri(G.rng, G.thesis.smin, G.thesis.smax), 0, 5), sector: G.thesis.sectors.length ? rp(G.rng, G.thesis.sectors) : undefined, city: G.home });
+    d.col = 1; d.hotUntil = G.week + 2;
+    const s = G.startups[d.sid]; know(s, 'P', s.h.P + rg(G.rng, 0, 16), 16); know(s, 'F', s.h.F + rg(G.rng, 0, 16), 16);
+    toast(`Hot deal: ${s.name} is raising and moving fast — 2 weeks.`, 'warn');
+    logMsg(`HOT DEAL: ${s.name} (${SECTOR_BY_ID[s.sector].name}) — round closes in ~2 weeks, rivals circling.`, 'warn');
+  }
+}
+
+function pipelineWeek() {
+  for (const d of G.deals) {
+    if (d.status !== 'open') continue;
+    const s = G.startups[d.sid];
+    if (!s || s.status !== 'private' || !s.round) { endDeal(d, 'lost', 'round closed'); continue; }
+    const age = G.week - d.w0;
+    if (d.col === 0 && age >= 5) { endDeal(d, 'expired', 'went stale'); continue; }
+    // preemption
+    const k = s.round.rivals.length;
+    if (k && d.col >= 1 && !s.round.taken && rc(G.rng, 0.012 * k * (d.col >= 3 ? 1.4 : 1))) {
+      const rv = s.round.rivals[0];
+      endDeal(d, 'lost', `${rv.name} preempted`);
+      s.round.end = Math.min(s.round.end, G.week + 1);
+      logMsg(`${rv.name} preempted ${s.name} before you could move.`, 'warn');
+      continue;
+    }
+    if (d.col === 4 && d.tsDeadline != null && G.week > d.tsDeadline) {
+      endDeal(d, 'lost', 'term sheet window closed');
+      s.round.end = Math.min(s.round.end, G.week + 1);
+      logMsg(`${s.name}: your term sheet window closed — the founder signed elsewhere.`, 'warn');
+    }
+  }
+  if (G.deals.length > 400) G.deals = G.deals.filter(d => d.status === 'open' || G.week - (d.endW || 0) < 40);
+}
+
+// ------------------------------------------------------------------ macro / heat
+function updateHeat() {
+  for (const sec of SECTORS) {
+    G.heatOu[sec.id] = G.heatOu[sec.id] * 0.97 + rg(G.rng, 0, 0.035);
+    G.heat[sec.id] = sectorHeatAt(sec, G.week, G.heatOu[sec.id]);
+  }
+}
+function updateMacro() {
+  const row = MACRO_TRANS[G.macro.regime];
+  const x = rf(G.rng); let acc = 0;
+  for (const k of Object.keys(row)) { acc += row[k]; if (x <= acc) { if (k !== G.macro.regime) { logMsg(`Macro regime shifts: ${MACRO[k].name}. Rates ${MACRO[k].rate}.`, k === 'bull' ? 'good' : k === 'normal' ? 'info' : 'warn'); G.macro = { regime: k, since: G.week }; } break; }
+  }
+}
+
+// ------------------------------------------------------------------ the weekly tick
+function personalWeekly() {
+  const fee = annualFee() / 52;
+  return fee - (LIVING_COST_YR + (G.car ? CAR_COST_YR : 0) + G.staff.analysts * ANALYST_YR + G.staff.scouts.length * SCOUT_YR) / 52;
+}
+function activeHoldings() { return Object.values(G.hold).filter(h => h.status === 'active'); }
+function boardSeats() { return activeHoldings().filter(h => h.board).length; }
+
+function advanceWeek() {
+  if (G.over) return;
+  const w = G.week;
+  // money
+  if (w < FUND_WEEKS) callCapital(annualFee() / 52, 'fee');
+  G.cash += personalWeekly();
+  if (G.cash < 0) {
+    if (G.car) { G.car = false; logMsg('Personal cash ran dry: the car lease was cancelled.', 'bad'); }
+    else if (G.staff.scouts.length) { G.staff.scouts.pop(); logMsg('Personal cash ran dry: a scout was let go.', 'bad'); }
+    else if (G.staff.analysts) { G.staff.analysts--; logMsg('Personal cash ran dry: an analyst was let go.', 'bad'); }
+  }
+  // world
+  updateHeat();
+  if (w > 0 && w % 13 === 0) updateMacro();
+  const ids = Object.keys(G.startups);
+  for (const id of ids) stepStartup(G.startups[id]);
+  pipelineWeek();
+  if (!G.noSource) sourcingWeek();
+  rollEvents();
+  // board load
+  G.boardAcc = (G.boardAcc || 0) + boardSeats() / 6.5;
+  let boardAP = 0; while (G.boardAcc >= 1) { boardAP++; G.boardAcc -= 1; }
+  G.apDebt += boardAP;
+  // quarterly
+  if ((w + 1) % 13 === 0) quarterly();
+  if (w % 4 === 3) { recordHistory(); G.heatHist.push({ w, h: SECTORS.map(x => G.heat[x.id]) }); }
+  // prune
+  if (w % 26 === 25) pruneStartups();
+  G.week++;
+  G.recentToastsCleared = 0;
+  if (G.week >= FUND_WEEKS) { G.over = true; finalizeFund(); return; }
+  const debt = Math.min(G.apDebt, AP_BASE - 3);
+  G.ap = AP_BASE - debt; G.apDebt = Math.max(0, G.apDebt - debt);
+  for (const d of G.deals) d.apNote = 0;
+}
+
+function pruneStartups() {
+  const keep = new Set();
+  for (const d of G.deals) if (d.status === 'open') keep.add(d.sid);
+  for (const k of Object.keys(G.hold)) keep.add(+k);
+  for (const l of G.ledger) keep.add(l.sid);
+  for (const id of Object.keys(G.startups)) {
+    if (keep.has(+id)) continue;
+    const s = G.startups[id];
+    if (s.status === 'private' && !s.round) continue;
+    if (s.status === 'private' && s.round && !s.round.taken) { // un-sourced company still alive: keep simulating a while (cheap)
+      if (G.week - s.born < 150) continue;
+    }
+    delete G.startups[id];
+  }
+}
+
+function quarterly() {
+  // portfolio updates
+  for (const h of activeHoldings()) {
+    const s = G.startups[h.sid];
+    if (s.status !== 'private') continue;
+    const growth = s.h.P > 0 ? growthMo(s) : 0;
+    const spinning = growth < 0.025 || runwayMo(s) < 8;
+    const dish = (100 - s.h.I) / 100;
+    const spin = spinning ? dish * (h.board ? 0.18 : 0.45) * (0.6 + 0.8 * hashStr(s.id + ':' + G.week) / 4294967295) : 0;
+    s.report = { w: G.week, mrr: s.mrr * (1 + spin), burn: netBurn(s) * (1 - spin * 0.5), runway: runwayMo(s) * (1 + spin * 0.8), hc: headcount(s) * (1 + spin * 0.6), spun: spin > 0.06 };
+    G.reportsLog = G.reportsLog || [];
+  }
+  const m = fundMetrics();
+  const d = dateOf(G.week);
+  const expected = 0.88 + 0.2 * (G.week / 52);
+  let dTrust = clamp((m.tvpi - expected) * 3, -2.5, 2.5);
+  if (driftLevel() > 0.3) dTrust -= 1.5;
+  if (G.week < 26) dTrust = Math.max(dTrust, 0);
+  G.lpTrust = clamp(G.lpTrust + dTrust, 0, 100);
+  G.reports.push({ w: G.week, q: d.q, year: d.fy, tvpi: m.tvpi, dpi: m.dpi, irr: m.irr, nav: m.nav, trust: G.lpTrust, drift: driftLevel() });
+  logMsg(`Q${d.q} LP report sent — TVPI ${fx(m.tvpi)}, DPI ${fx(m.dpi)}. LP trust ${Math.round(G.lpTrust)}.`, 'info');
+  // staff thinking about leaving? (kept simple)
+}
+
+// ------------------------------------------------------------------ random events
+function rollEvents() {
+  const hs = activeHoldings();
+  for (const h of hs) {
+    const s = G.startups[h.sid];
+    if (s.status !== 'private') continue;
+    if (G.queue.some(e => e.sid === h.sid)) continue;
+    if (!rc(G.rng, 0.010)) continue;
+    const opts = [
+      ['cofounder', 1.0 + clamp((60 - s.h.F) / 35, -0.6, 1.5)],
+      ['custlost', s.mrr > 40e3 ? 0.9 : 0.1],
+      ['competitor', 0.8],
+      ['regulatory', (s.sector === 'fin' || s.sector === 'health') ? 1.3 : 0.2],
+      ['poach', s.done >= 1 ? 0.7 : 0.1],
+      ['scandal', clamp(0.25 + (55 - s.h.I) / 50, 0.05, 1.2)],
+      ['acquihire', (s.h.P < 48 && s.done <= 2 && s.mrr < 1e6) ? 0.9 : 0.05],
+    ];
+    const pick = rw(G.rng, opts, o => o[1])[0];
+    pushEvent(pick, s.id);
+  }
+  if (G.week > 52 && rc(G.rng, 0.006)) pushEvent('lpliquidity', 0);
+  if (G.week > 20 && rc(G.rng, 0.006) && hs.length) pushEvent('leak', hs[Math.floor(rf(G.rng) * hs.length)].sid);
+}
+
+function finalizeFund() {
+  G.over = true;
+  const m = fundMetrics(true);
+  G.final = m;
+  recordHistory();
+}
+
+// ============================================================================
+// ACTIONS: everything the player can spend AP on
+// All return {ok:bool, msg:string,...}; UI shows msg as a toast on failure.
+// ============================================================================
+
+const COL_NAMES = ['Sourced', 'Screened', 'Meeting', 'Diligence', 'Term sheet'];
+const TOOL_INFO = {
+  data: { name: 'Data room', ap: COST.data, cash: 0, desc: 'Revenue, burn, growth. Founders can window-dress it.' },
+  refs: { name: 'Founder references', ap: COST.refs, cash: 0, desc: 'Integrity and team dynamics. References are hand-picked.' },
+  cust: { name: 'Customer calls', ap: COST.cust, cash: 0, desc: 'Real product-market fit. Up to 3 rounds of calls.' },
+  tech: { name: 'Technical expert', ap: COST.tech, cash: CASHCOST.tech, desc: 'Paid expert: does the tech actually work?' },
+  bg:   { name: 'Background check', ap: COST.bg, cash: CASHCOST.bg, desc: 'Fraud history, litigation, odd corporate filings.' },
+};
+const TOOL_ORDER = ['data', 'refs', 'cust', 'tech', 'bg'];
+
+const fail = msg => ({ ok: false, msg });
+const okr = (msg, extra) => Object.assign({ ok: true, msg }, extra || {});
+function spendAp(n) { if (G.ap < n) return false; G.ap -= n; return true; }
+function dealStartup(d) { return G.startups[d.sid]; }
+function note(d, tag, text, kind) { d.notes.push({ w: G.week, tag, text, kind: kind || 'info' }); }
+function opexCall(amt) { if (amt > 0) callCapital(amt, 'opex'); }
+
+// ---------------------------------------------------------------- pipeline moves
+function gateRep(d) {
+  const s = dealStartup(d);
+  return Math.max(0, Math.round((s.q - 68) * 1.6 - (d.channel === 'referral' ? 12 : 0)));
+}
+function advanceCost(d) { return [COST.screen, COST.meet, COST.dd, COST.ts][d.col] || 0; }
+function canAdvance(d) {
+  if (d.status !== 'open') return fail('Deal is closed.');
+  if (d.col >= 4) return fail('Already at term sheet.');
+  const s = dealStartup(d);
+  if (!s || !s.round) return fail('The round has closed.');
+  if (G.ap < advanceCost(d)) return fail(`Needs ${advanceCost(d)} AP.`);
+  if (d.movedW === G.week && !(d.hotUntil && G.week <= d.hotUntil)) return fail('Founders need a week to respond — try next turn.');
+  if (d.col === 1 && G.rep < gateRep(d)) return fail(`Founder won't take your call yet (needs reputation ${gateRep(d)}; you have ${Math.round(G.rep)}).`);
+  if (d.col === 3 && G.week > s.round.end) return fail('Round is closing.');
+  return { ok: true };
+}
+function advanceDeal(d) {
+  const c = canAdvance(d); if (!c.ok) return c;
+  const s = dealStartup(d);
+  spendAp(advanceCost(d));
+  d.movedW = G.week;
+  if (d.col === 0) {
+    know(s, 'P', s.h.P + (s.dress * 50) + rg(G.rng, 0, 30 * noiseMult()), 30);
+    know(s, 'T', s.h.T + rg(G.rng, 0, 26 * noiseMult()), 26);
+    know(s, 'F', s.h.F + rg(G.rng, 0, 28 * noiseMult()), 28);
+    d.col = 1;
+    note(d, 'Deck', `Skimmed the deck: ${s.pitch}. ${thesisFit(s).ok ? 'Squarely on-thesis.' : 'Off-thesis — would count as drift.'}`);
+  } else if (d.col === 1) {
+    observe(s, 'F', 16); observe(s, 'I', 30); observe(s, 'T', 24);
+    d.col = 2;
+    note(d, 'Meeting', `Met ${s.founder.name}. ${s.founder.quirk}.`);
+  } else if (d.col === 2) {
+    d.col = 3;
+    note(d, 'Diligence', 'Diligence started — the toolkit is open.');
+  } else if (d.col === 3) {
+    d.col = 4;
+    d.ts = defaultTerms(d);
+    const k = s.round.rivals.length;
+    d.tsDeadline = Math.min(s.round.end, G.week + (k >= 2 ? 1 : k === 1 ? 2 : 3));
+    note(d, 'Term sheet', `Preparing a term sheet. Window closes in ${Math.max(0, d.tsDeadline - G.week)} week(s).`);
+  }
+  return okr(`${s.name} → ${COL_NAMES[d.col]}`);
+}
+function passDeal(d, why) {
+  if (d.status !== 'open') return fail('Deal is closed.');
+  endDeal(d, 'passed', why || 'you passed');
+  return okr('Passed.');
+}
+
+// ---------------------------------------------------------------- diligence
+function diligenceCoverage(d) {
+  let n = 0;
+  if (d.tools.data) n++; if (d.tools.refs) n++; if (d.tools.cust) n++; if (d.tools.tech) n++; if (d.tools.bg) n++;
+  if (Object.keys(d.hq).length) n++;
+  return n / 6;
+}
+function toolAvailable(d, tool) {
+  const t = TOOL_INFO[tool];
+  if (d.status !== 'open') return fail('Deal is closed.');
+  if (d.col < 3) return fail('Move the deal to Diligence first.');
+  if (tool === 'cust') { if ((d.tools.cust || 0) >= 3) return fail('You have already run three rounds of customer calls.'); }
+  else if (d.tools[tool]) return fail('Already done.');
+  if (G.ap < t.ap) return fail(`Needs ${t.ap} AP.`);
+  if (t.cash > uncalled() + G.fundCash - annualFee() / 52 * weeksLeft() * 0.8) return fail('The fund cannot cover this expense.');
+  return { ok: true };
+}
+function useTool(d, tool) {
+  const c = toolAvailable(d, tool); if (!c.ok) return c;
+  const s = dealStartup(d), t = TOOL_INFO[tool];
+  spendAp(t.ap); opexCall(t.cash);
+  const dish = (100 - s.h.I) / 100;
+  if (tool === 'data') {
+    d.tools.data = 1;
+    const rm = s.mrr * (1 + s.dress), rg_ = growthMo(s) + s.dress * 0.35, nb = netBurn(s) * (1 - s.dress * 0.5);
+    const cash = s.cash * (1 + s.dress * 0.15), run = nb > 1 ? cash / nb : 99;
+    d.reported = { mrr: rm, g: rg_, burn: nb, cash, runway: run, hc: Math.round(headcount(s) * (1 + s.dress * 0.7)) };
+    observe(s, 'B', 12, -s.dress * 20);
+    know(s, 'P', s.h.P + s.dress * 60 + rg(G.rng, 0, 18 * noiseMult() * fitMult(s)), 18);
+    note(d, 'Data room', `Reported MRR ${fm(rm)} (${rg_ >= 0 ? '+' : ''}${(rg_ * 100).toFixed(1)}%/mo), net burn ${fm(nb)}/mo, cash ${fm(cash)} → ${run > 60 ? '60+' : run.toFixed(0)} months runway. Headcount ${d.reported.hc}.`);
+  } else if (tool === 'refs') {
+    d.tools.refs = 1;
+    const f = observe(s, 'F', 14, dish * 10), i = observe(s, 'I', 16, dish * 14);
+    const lines = [];
+    lines.push(f > 65 ? 'References rave about the founder\'s speed and judgment.' : f > 45 ? 'References call the founder "solid, still learning".' : 'References are lukewarm — lots of diplomatic pauses.');
+    lines.push(i > 65 ? 'Everyone says they are straight with people.' : i > 45 ? 'Nobody flagged honesty concerns, but nobody volunteered praise either.' : 'One reference asked not to be quoted. That is a quote.');
+    note(d, 'References', lines.join(' '));
+  } else if (tool === 'cust') {
+    d.tools.cust = (d.tools.cust || 0) + 1;
+    const uses = d.tools.cust;
+    const p = observe(s, 'P', 16 / (1 + 0.25 * (uses - 1)), s.dress * 25), tm = observe(s, 'T', 24);
+    const pct = Math.round(clamp(p * 0.62 + rg(G.rng, 0, 3), 3, 75));
+    note(d, `Customers #${uses}`, `"Very disappointed if it disappeared": ${pct}% of the users you reached. ${pct > 40 ? 'That is a real signal.' : pct > 25 ? 'Warm, not on fire.' : 'Most would shrug.'}`);
+  } else if (tool === 'tech') {
+    d.tools.tech = 1;
+    const x = observe(s, 'X', 10);
+    note(d, 'Tech expert', x > 65 ? 'Expert: "Real engineering. The architecture holds up."' : x > 45 ? 'Expert: "Works, but there is duct tape. A lot of duct tape."' : 'Expert: "The demo is smoke and mirrors. Parts of it are a screen recording."');
+  } else if (tool === 'bg') {
+    d.tools.bg = 1;
+    const found = s.fraud ? rc(G.rng, 0.74) : rc(G.rng, 0.04);
+    d.bg = found ? 'flags' : 'clean';
+    if (found) { know(s, 'I', Math.min(s.h.I, 18) + rg(G.rng, 0, 6), 8); note(d, 'Background', s.fraud ? 'FLAGS: a prior venture wound up amid investor complaints, and an old regulatory filing mentions the founder by name.' : 'Flags: a civil dispute with a former cofounder — outcome unclear.', 'bad'); }
+    else { know(s, 'I', Math.max(s.h.I, 55) + rg(G.rng, 0, 12), 20); note(d, 'Background', 'No red flags found in filings, litigation or corporate records.', 'good'); }
+  }
+  return okr(`${t.name}: done.`);
+}
+
+function travelInfo(city) {
+  const rel = cityRelation(city);
+  if (rel === 'local') return { rel, ap: G.car ? COST.hqLocal - 1 : COST.hqLocal, debt: 0, label: 'Local' };
+  if (rel === 'region') return { rel, ap: COST.hqRegion, debt: 0, label: 'Regional flight' };
+  return { rel, ap: COST.hqFar, debt: 4, label: 'Intercontinental' };
+}
+const HQ_FOCUS = {
+  team: { name: 'Read the team', stat: 'F', desc: 'Culture, morale, who is actually at their desk.' },
+  board: { name: 'Study the whiteboard', stat: 'B', desc: 'The burn plan, the runway countdown.' },
+  qa: { name: 'Ask the awkward question', stat: 'I', desc: 'Watch the founder squirm — or not.' },
+  demo: { name: 'Demand a live demo', stat: 'X', desc: 'Does the product work without a script?' },
+};
+function hqAvailable(d, focus) {
+  if (d.status !== 'open') return fail('Deal is closed.');
+  if (d.col < 3) return fail('Move the deal to Diligence first.');
+  if (d.hq[focus]) return fail('You already looked into that.');
+  const s = dealStartup(d), ti = travelInfo(s.city);
+  if (G.ap < ti.ap) return fail(`Needs ${ti.ap} AP.`);
+  return { ok: true };
+}
+function hqVisit(d, focus) {
+  const c = hqAvailable(d, focus); if (!c.ok) return c;
+  const s = dealStartup(d), ti = travelInfo(s.city), F = HQ_FOCUS[focus];
+  spendAp(ti.ap);
+  let extra = '';
+  if (ti.debt) { G.apDebt += ti.debt; if (rc(G.rng, 0.15)) { G.apDebt += 2; extra = ' (Flight delayed: you lose 2 more AP next turn.)'; } }
+  const obs = observe(s, F.stat, 7);
+  for (const st2 of ['F', 'B', 'I', 'X']) if (st2 !== F.stat) observe(s, st2, 26); // you see the whole office, but only study one thing closely
+  d.hq[focus] = 1;
+  d.hqReal = headcount(s);
+  d.hqSeed = (d.hqSeed || 0) + hashStr(focus) % 1000;
+  if (focus === 'demo') observe(s, 'P', 20);
+  const real = headcount(s);
+  let txt = '';
+  if (focus === 'team') txt = obs > 62 ? 'Desks are full, people are arguing about product — the good kind.' : obs > 42 ? 'A decent team; a couple of empty chairs and a lot of Slack notifications.' : 'Half the desks are empty and nobody will say why.';
+  if (focus === 'board') txt = `Whiteboard: "RUNWAY ${runwayMo(s) > 40 ? '40+' : runwayMo(s).toFixed(0)} MO" in the corner. Burn plan is ${obs > 62 ? 'tight and annotated' : obs > 42 ? 'plausible' : 'a column of question marks'}.`;
+  if (focus === 'qa') txt = obs > 62 ? 'The founder answers the awkward question directly, then volunteers a worse one.' : obs > 42 ? 'The founder answers most of it; changes the subject once.' : 'The founder deflects three times and asks if you want coffee.';
+  if (focus === 'demo') txt = obs > 62 ? 'The live demo works, including the thing you asked them to try.' : obs > 42 ? 'The demo works after one restart.' : 'The demo crashes; the founder says "it works on my machine".';
+  note(d, `HQ visit`, `${txt} Real headcount: ${real}.${extra}`);
+  return okr(`HQ visit done (${F.name}).`, { focus });
+}
+function marketCheck(d) {
+  if (d.status !== 'open') return fail('Deal is closed.');
+  if (d.marketChecked) return fail('You already asked around.');
+  if (d.col < 1) return fail('Screen the deal first.');
+  if (!spendAp(COST.market)) return fail(`Needs ${COST.market} AP.`);
+  const s = dealStartup(d); d.marketChecked = true;
+  const rv = s.round.rivals;
+  note(d, 'Market check', rv.length ? `Word on the street: ${rv.map(r => r.name).join(', ')} ${rv.length > 1 ? 'are' : 'is'} circling.` : 'Nobody else seems to be in this round.');
+  return okr('You made a few calls.');
+}
+
+// ---------------------------------------------------------------- term sheets
+function followPre(d) { const rd = dealStartup(d).round; return rd.rivals.length ? Math.max.apply(null, rd.rivals.map(r => r.pre)) : rd.fair * 1.05; }
+function checkLimits(d, t) {
+  const rd = dealStartup(d).round;
+  let lo = Math.max(15000, rd.raise * 0.03), hi;
+  if (rd.safe) hi = rd.raise * 0.5;
+  else if (t.lead) { lo = Math.max(lo, rd.raise * 0.25); hi = rd.raise * 0.7; }
+  else hi = rd.raise * 0.3;
+  const funds = Math.max(0, generalPowder());
+  return { lo, hi: Math.max(lo, hi), funds, afford: funds >= lo };
+}
+function defaultTerms(d) {
+  const rd = dealStartup(d).round;
+  const t = { safe: rd.safe, lead: false, valPct: 1.0, check: 0, board: false, prorata: false, pool: 0.10, pref: '1x', anti: 'wa', mfn: false, disc: 0 };
+  const want = G.size * G.thesis.check;
+  t.lead = !rd.safe && want >= rd.raise * 0.25;
+  const lim = checkLimits(d, t);
+  t.check = Math.round(clamp(want, lim.lo, lim.hi) / 5000) * 5000;
+  if (t.lead) { t.board = true; t.prorata = true; }
+  return t;
+}
+function termsPreview(d, t) {
+  const s = dealStartup(d), rd = s.round;
+  let pre, own;
+  if (t.safe) { pre = rd.ask * t.valPct; own = t.check / pre; }
+  else if (t.lead) { pre = rd.ask * t.valPct; own = t.check / (pre + rd.raise); }
+  else { pre = followPre(d); own = t.check / (pre + rd.raise); }
+  return { pre, post: pre + (t.safe ? 0 : rd.raise), own, raise: rd.raise };
+}
+function termUtility(d, t) {
+  const s = dealStartup(d), rd = s.round;
+  let u = (G.rep - 50) / 50;
+  if (t.safe || t.lead) u += 3.2 * Math.log(Math.max(0.2, t.valPct));
+  if (t.safe) { u += 0.25; if (t.mfn) u -= 0.1; if (t.disc) u -= 0.12; if (t.prorata) u -= 0.08; }
+  else if (t.lead) {
+    u += 0.5 * (t.check / rd.raise);
+    if (t.board) u -= 0.12; if (t.prorata) u -= 0.1;
+    if (t.pref === 'part') u -= 0.9;
+    if (t.anti === 'wa') u -= 0.2; else if (t.anti === 'ratchet') u -= 1.3;
+    u -= (t.pool * 100 - 10) * 0.05;
+  }
+  u += 0.5 * Math.max(0, 1 - (G.week - d.w0) / 5);
+  u += 0.5 * G.vaScore + (thesisFit(s).ok ? 0.15 : 0);
+  if (d.channel === 'referral') u += 0.2;
+  return u;
+}
+function winProb(d, t) {
+  const s = dealStartup(d), rd = s.round;
+  if (!t.lead && !t.safe) { // following someone else's lead: it's about getting allocation
+    const hot = rd.rivals.length;
+    return sigmoid(1.0 + (G.rep - 25) / 30 - 0.7 * hot + 0.5 * G.vaScore - 1.2 * (t.check / rd.raise) + (d.channel === 'referral' ? 0.4 : 0));
+  }
+  const u = termUtility(d, t);
+  const best = rd.rivals.length ? Math.max.apply(null, rd.rivals.map(r => r.u)) : -0.9;
+  return sigmoid((u - best) / 0.5);
+}
+function founderMood(p) { return p > 0.8 ? 'Eager' : p > 0.55 ? 'Warm' : p > 0.3 ? 'Lukewarm' : 'Cold'; }
+
+function sendTermSheet(d, t) {
+  if (d.status !== 'open') return fail('Deal is closed.');
+  if (d.col < 4) return fail('Not at term-sheet stage.');
+  const s = dealStartup(d), rd = s.round;
+  if (!rd) return fail('The round has closed.');
+  const lim = checkLimits(d, t);
+  if (t.check < lim.lo - 1 || t.check > lim.hi + 1) return fail('Check size is outside what this round allows.');
+  if (t.check > lim.funds + 1) return fail(`Initial-check budget is ${fm(lim.funds)} (the rest is reserved for follow-ons).`);
+  if (G.ap < COST.send) return fail(`Needs ${COST.send} AP.`);
+  spendAp(COST.send);
+  const p = winProb(d, t);
+  if (rf(G.rng) < p) return closeDeal(d, t);
+  const best = rd.rivals.slice().sort((a, b) => b.u - a.u)[0];
+  const who = best ? best.name : 'another investor';
+  endDeal(d, 'lost', `founder went with ${who}`);
+  rd.end = Math.min(rd.end, G.week + 1);
+  logMsg(`${s.name}: the founder chose ${who} over your term sheet.`, 'bad');
+  return { ok: true, won: false, msg: `Lost: ${s.name} chose ${who}.` };
+}
+function closeDeal(d, t) {
+  const s = dealStartup(d), rd = s.round, pv = termsPreview(d, t);
+  const lead = t.lead || t.safe;
+  opexCall(t.safe ? CASHCOST.legalSafe : CASHCOST.legalPriced);
+  callCapital(t.check, 'inv');
+  rd.taken = true;
+  const best = rd.rivals.slice().sort((a, b) => b.u - a.u)[0];
+  const leadName = lead ? G.fundName : (best ? best.name : 'Angel syndicate');
+  const mine = [{ invested: t.check, pref: t.lead ? t.pref : '1x', anti: t.lead ? t.anti : 'wa', disc: t.disc, mfn: t.mfn }];
+  const rec = closeRound(s, { pre: t.safe ? rd.ask * t.valPct : pv.pre, raise: rd.raise, lead: leadName, poolPct: t.lead ? t.pool : 0.10, mine, safeRound: t.safe });
+  const h = G.hold[s.id];
+  h.board = !!(t.lead && !t.safe && t.board);
+  h.prorata = !!t.prorata && (t.lead || t.safe);
+  h.lead = lead;
+  let rel = 62 + (t.valPct - 1) * 35 + G.vaScore * 8;
+  if (t.lead && !t.safe) { if (t.pref === 'part') rel -= 10; if (t.anti === 'ratchet') rel -= 14; else if (t.anti === 'wa') rel -= 2; rel -= (t.pool * 100 - 10) * 0.5; }
+  h.rel = clamp(rel, 20, 95);
+  h.diligence = diligenceCoverage(d);
+  h.stage0 = rd.stage; h.q0 = s.q; h.entryW = G.week; h.entryPost = rec.post;
+  if (s.fraud) h.fraudAt = G.week + ri(G.rng, 10, 60);
+  G.recent.push(!thesisFit(s).ok);
+  G.stats.closed++;
+  if (lead) G.rep = Math.min(100, G.rep + 0.3);
+  if (rd.rivals.length) G.net += 0.4;
+  G.founderRel = clamp(sum(activeHoldings(), x => x.rel) / Math.max(1, activeHoldings().length), 0, 100);
+  endDeal(d, 'closed', 'invested');
+  logMsg(`CLOSED: ${fm(t.check)} into ${s.name} (${stageName(rec.stage)}${t.safe ? ' SAFE' : ''}) — ${fp(pv.own, 1)} for ${fm(rec.post)} ${t.safe ? 'cap' : 'post'}${h.board ? ', board seat' : ''}.`, 'good');
+  return { ok: true, won: true, msg: `Closed ${s.name}!` };
+}
+
+// ---------------------------------------------------------------- portfolio help
+const HELP_INFO = {
+  intro: { name: 'Investor intros', ap: COST.help.intro, desc: 'Warm intros to next-round investors: makes the next raise easier.' },
+  hire:  { name: 'Hiring help', ap: COST.help.hire, desc: 'Recruit senior hires; nudges team quality up.' },
+  raise: { name: 'Fundraising help', ap: COST.help.raise, desc: 'Narrative, data room and process coaching before a raise.' },
+  pivot: { name: 'Pivot advice', ap: COST.help.pivot, desc: 'Most useful when product-market fit is struggling.' },
+  cust:  { name: 'Customer intros', ap: COST.help.cust, desc: 'Open doors to real customers; lifts revenue and PMF.' },
+};
+function helpAvailable(h, type) {
+  const s = G.startups[h.sid];
+  if (h.status !== 'active' || s.status !== 'private') return fail('Not available.');
+  if ((h.helpCd[type] || 0) > G.week) return fail(`Cooling down for ${h.helpCd[type] - G.week} more week(s).`);
+  if (G.ap < HELP_INFO[type].ap) return fail(`Needs ${HELP_INFO[type].ap} AP.`);
+  return { ok: true };
+}
+function helpAction(h, type) {
+  const c = helpAvailable(h, type); if (!c.ok) return c;
+  const s = G.startups[h.sid];
+  spendAp(HELP_INFO[type].ap);
+  h.helpCd[type] = G.week + 4;
+  const p = clamp(0.62 + G.rep / 250 + (h.rel - 50) / 300 + (h.board ? 0.08 : 0), 0.3, 0.95);
+  s.helped = s.helped || {};
+  const bump = (st, amt) => { const used = s.helped[st] || 0; const room = Math.max(0, 12 - used); const d = Math.min(room, amt); s.h[st] = Math.min(98, s.h[st] + d); s.helped[st] = used + d; return d; };
+  if (rf(G.rng) >= p) { logMsg(`${HELP_INFO[type].name} for ${s.name} didn't land this time.`, 'info'); return okr('It didn\'t land.', { landed: false }); }
+  let msg = '';
+  if (type === 'intro') { if (s.round) s.round.prep += 0.35; else s.nextPrep = (s.nextPrep || 0) + 0.35; G.net += 0.4; msg = 'Two good investors took the call.'; }
+  if (type === 'hire') { bump('F', rr(G.rng, 1.5, 3.5)); msg = 'A strong senior hire signed.'; }
+  if (type === 'raise') { if (s.round) s.round.prep += 0.5; else s.nextPrep = (s.nextPrep || 0) + 0.5; msg = 'The pitch narrative got sharper.'; }
+  if (type === 'pivot') { const d = bump('P', s.h.P < 55 ? rr(G.rng, 3, 9) : rr(G.rng, 0.5, 2)); if (s.h.P < 55) s.gMod += 0.004; msg = 'The new positioning resonated.'; }
+  if (type === 'cust') { bump('P', rr(G.rng, 1, 3)); s.mrr *= 1 + rr(G.rng, 0.03, 0.09); G.net += 0.3; msg = 'Three new customers signed.'; }
+  G.vaScore = Math.min(1, G.vaScore + 0.02); G.rep = Math.min(100, G.rep + 0.05);
+  h.rel = Math.min(100, h.rel + 1);
+  logMsg(`${HELP_INFO[type].name} for ${s.name}: ${msg}`, 'good');
+  return okr(msg, { landed: true });
+}
+
+// ---------------------------------------------------------------- selling public / locked
+function canSellPublic(h) { const s = G.startups[h.sid]; return s.status === 'public' && h.status === 'active' && G.week >= h.lockUntil; }
+function sellPublic(h, frac) {
+  if (!canSellPublic(h)) return fail(G.week < h.lockUntil ? `Locked up for ${h.lockUntil - G.week} more week(s).` : 'Nothing to sell.');
+  if (!spendAp(1)) return fail('Needs 1 AP.');
+  const s = G.startups[h.sid];
+  const val = publicValue(h) * frac;
+  const f = fd(s);
+  for (const t of h.tr) { t.shares *= (1 - frac); }
+  h.invested0 = h.invested0 || h.invested;
+  const costPart = h.invested * frac;
+  distribute(val); h.realized += val;
+  G.realizedLog.push({ sid: h.sid, name: s.name, invested: costPart, got: val, w: G.week, kind: 'public sale' });
+  h.invested -= costPart; h.realizedCost = (h.realizedCost || 0) + costPart;
+  if (frac >= 0.999) { h.status = 'exited'; h.exitW = G.week; h.invested = h.invested0; finishExit(h, val, 'Sold position'); }
+  else logMsg(`Sold ${Math.round(frac * 100)}% of ${s.name} for ${fm(val)}.`, 'good');
+  return okr(`Sold for ${fm(val)}.`);
+}
+
+// secondary sale of a private position (any stage >= seed) at a discount
+function secondaryOffer(h) {
+  const s = G.startups[h.sid];
+  if (s.status !== 'private' || s.done < 1) return null;
+  return { disc: 0.2 + 0.08 * (MACRO[G.macro.regime].val < 1 ? 1 : 0), val: holdingMark(h) };
+}
+function sellSecondary(h, frac) {
+  const so = secondaryOffer(h); if (!so) return fail('No secondary market for this position.');
+  if (!spendAp(1)) return fail('Needs 1 AP.');
+  const s = G.startups[h.sid];
+  const val = so.val * frac * (1 - so.disc);
+  const cost = h.invested * frac;
+  for (const t of h.tr) { t.shares *= (1 - frac); t.invested *= (1 - frac); }
+  distribute(val); h.realized += val; h.invested -= cost; h.realizedCost = (h.realizedCost || 0) + cost;
+  G.realizedLog.push({ sid: h.sid, name: s.name, invested: cost, got: val, w: G.week, kind: 'secondary' });
+  logMsg(`Secondary: sold ${Math.round(frac * 100)}% of ${s.name} for ${fm(val)} (${Math.round(so.disc * 100)}% below mark).`, 'info');
+  if (frac >= 0.999) { h.status = 'exited'; h.exitW = G.week; }
+  return okr(`Sold for ${fm(val)}.`);
+}
+
+// ---------------------------------------------------------------- sourcing, staff, car
+function coldOutreach(sector) {
+  if (!spendAp(COST.cold)) return fail(`Needs ${COST.cold} AP.`);
+  const n = rc(G.rng, 0.5) ? 0 : (rc(G.rng, 0.15) ? 2 : 1);
+  for (let i = 0; i < n; i++) sourceDeal('cold', { sector, stage: ri(G.rng, G.thesis.smin, G.thesis.smax) });
+  const msg = n ? `Cold outreach landed ${n} reply${n > 1 ? 's' : ''}.` : 'Cold outreach: crickets.';
+  logMsg(msg, 'info');
+  return okr(msg, { n });
+}
+function hireAnalyst() { if (G.staff.analysts >= 3) return fail('Max 3 analysts.'); G.staff.analysts++; return okr('Analyst hired: diligence noise drops.'); }
+function fireAnalyst() { if (!G.staff.analysts) return fail('No analysts.'); G.staff.analysts--; return okr('Analyst let go.'); }
+function hireScout(sec) { if (G.staff.scouts.length >= 3) return fail('Max 3 scouts.'); G.staff.scouts.push(sec); return okr('Scout hired.'); }
+function fireScout(i) { G.staff.scouts.splice(i, 1); return okr('Scout let go.'); }
+function toggleCar() { G.car = !G.car; return okr(G.car ? 'Car leased: local visits cost 1 AP less.' : 'Car returned.'); }
+
+// ---------------------------------------------------------------- turn control
+function endTurn() {
+  if (G.over) return fail('The fund is closed.');
+  advanceWeek();
+  return okr('Week advanced.');
+}
+function skipWeeks(n) {
+  let i = 0;
+  while (i < n && !G.over && !G.queue.length) { advanceWeek(); i++; }
+  return i;
+}
+
+// ============================================================================
+// METRICS: NAV, TVPI / DPI / net IRR, final scoring
+// ============================================================================
+
+function xirr(flows) {
+  let hasNeg = false, hasPos = false;
+  for (const f of flows) { if (f.a < 0) hasNeg = true; if (f.a > 0) hasPos = true; }
+  if (!hasNeg || !hasPos) return null;
+  const npv = r => { let t = 0; for (const f of flows) t += f.a / Math.pow(1 + r, f.w / 52); return t; };
+  let lo = -0.95, hi = 4;
+  let flo = npv(lo), fhi = npv(hi);
+  if (flo * fhi > 0) return flo > 0 ? hi : lo;
+  for (let i = 0; i < 80; i++) { const mid = (lo + hi) / 2, fm_ = npv(mid); if (flo * fm_ <= 0) { hi = mid; fhi = fm_; } else { lo = mid; flo = fm_; } }
+  return (lo + hi) / 2;
+}
+
+function positionValue(h, final) {
+  const s = G.startups[h.sid];
+  if (!s) return 0;
+  if (s.status === 'public') return publicValue(h);
+  const v = holdingMark(h);
+  return final ? v * 0.85 : v;
+}
+
+function fundMetrics(final) {
+  let nav = Math.max(0, G.fundCash);
+  for (const h of activeHoldings()) nav += positionValue(h, final);
+  const paidIn = Math.max(1, G.called);
+  const carryAccrued = CARRY_PCT * Math.max(0, G.dist + nav - paidIn);
+  const carryUnpaid = Math.max(0, carryAccrued - G.carryPaid);
+  const netNav = nav - carryUnpaid;
+  const dpi = (G.dist - G.carryPaid) / paidIn;
+  const tvpi = (G.dist - G.carryPaid + netNav) / paidIn;
+  const irr = G.week < 52 && !final ? null : xirr(G.flows.concat([{ w: G.week, a: netNav }]));
+  return { nav, netNav, paidIn, tvpi, dpi, irr, carryAccrued, carryUnpaid };
+}
+
+function scoreFund(m) {
+  const irr = m.irr == null ? -0.2 : m.irr;
+  const a = clamp(irr / 0.25, 0, 1), b = clamp((m.tvpi - 1) / 2.5, 0, 1), c = clamp(m.dpi / 3, 0, 1);
+  const base = 100 * (0.35 * a + 0.35 * b + 0.30 * c);
+  const repBonus = clamp(G.rep / 100, 0, 1) * 6;
+  const score = Math.round(base + repBonus);
+  const T = [
+    [92, 'S', 'Hall of Fame GP'], [78, 'A', 'Top-decile manager'], [60, 'B', 'Top-quartile manager'],
+    [42, 'C', 'Respectable median'], [22, 'D', 'LPs politely stop returning your calls'], [0, 'F', 'The haircut was the best investment you made'],
+  ];
+  const t = T.find(x => score >= x[0]);
+  return { score, base: Math.round(base), repBonus: Math.round(repBonus * 10) / 10, grade: t[1], title: t[2] };
+}
+
+// helper summaries for UI
+function portfolioRows() {
+  const rows = [];
+  for (const h of Object.values(G.hold)) {
+    const s = G.startups[h.sid]; if (!s) continue;
+    const active = h.status === 'active';
+    const mark = active ? positionValue(h) : 0;
+    rows.push({ h, s, active, mark, moic: (mark + h.realized) / Math.max(1, h.invested), own: ownPct(s, h) });
+  }
+  rows.sort((a, b) => (b.active - a.active) || (b.mark + b.h.realized) - (a.mark + a.h.realized));
+  return rows;
+}
+
+// ============================================================================
+// EVENTS: decisions that interrupt the week. Serialised as {type,sid,data};
+// text/options/resolution live here so saves stay small.
+// ============================================================================
+
+const followFunds = () => Math.max(0, dryPowder());
+function proRataAmt(s, h) {
+  const own = ownPct(s, h);
+  const rd = s.round; if (!rd) return 0;
+  return Math.round(own * rd.raise * (h.prorata ? 1 : 0.5) / 5000) * 5000;
+}
+function bridgeAmt(s) { return Math.round(clamp(netBurn(s) * 6, 60e3, G.size * 0.15) / 10000) * 10000; }
+function saleValue(s) { return acqhireEV(s); }
+const opt = (id, label, sub, extra) => Object.assign({ id, label, sub: sub || '', ap: 0, disabled: false }, extra || {});
+function needAp(o) { if (o.ap > G.ap) { o.disabled = true; o.why = `Needs ${o.ap} AP`; } return o; }
+
+const EVENT_DEFS = {
+  followon: {
+    title: (ev, s) => `${s.name} is raising ${stageName(ev.data.k)}`,
+    body: (ev, s, h) => {
+      const rd = s.round, amt = proRataAmt(s, h);
+      return [`Insiders are being asked to commit first. Your decision is a signal: pass, and the market reads it as a bad sign; follow, and it reads as conviction.`,
+        `Target raise ~${fm(rd.raise)}${rd.safe ? ' on a SAFE' : ''}. Reported MRR ${fm(s.mrr)}, runway ${runwayMo(s) > 40 ? '40+' : runwayMo(s).toFixed(0)} months.`,
+        `Your stake: ${fp(ownPct(s, h), 1)} (cost ${fm(h.invested)}, mark ${fm(holdingMark(h))}). Pro-rata ${h.prorata ? 'rights' : 'courtesy allocation (no rights)'}: ${fm(amt)}.`,
+        `Dry powder ${fm(dryPowder())}, of which reserves ${fm(G.reserveLeft)}.`];
+    },
+    opts: (ev, s, h) => {
+      const amt = proRataAmt(s, h), f = followFunds();
+      return [
+        opt('full', `Take full pro-rata — ${fm(amt)}`, 'Strong signal; the round gets easier.', { disabled: amt < 10000 || amt > f, why: amt > f ? 'Not enough dry powder' : 'Too small to matter' }),
+        opt('half', `Take half — ${fm(amt / 2)}`, 'Neutral signal.', { disabled: amt < 20000 || amt / 2 > f, why: 'Not enough dry powder' }),
+        opt('pass', 'Pass', 'The market will notice.'),
+      ];
+    },
+    resolve: (ev, id, s, h) => {
+      const rd = s.round, amt = proRataAmt(s, h);
+      if (!rd) return 'The round closed before you could respond.';
+      if (id === 'full') { rd.mySlice = amt; rd.signal += 0.35; h.rel = Math.min(100, h.rel + 2); G.net += 0.3; return `Committed ${fm(amt)} to ${s.name}'s round.`; }
+      if (id === 'half') { rd.mySlice = amt / 2; return `Committed ${fm(amt / 2)} to ${s.name}'s round.`; }
+      rd.signal -= 0.5; h.rel = Math.max(0, h.rel - 2); return `You passed on the follow-on in ${s.name}. Others noticed.`;
+    },
+  },
+
+  runway: {
+    title: (ev, s) => `${s.name}: runway is ending`,
+    body: (ev, s) => [`The raise fell through and there are ${runwayMo(s).toFixed(1)} months of cash left. MRR ${fm(s.mrr)}, net burn ${fm(netBurn(s))}/mo, ${headcount(s)} people.`, `Decide: bridge them, back a pivot, sell what exists, or turn off the lights.`],
+    opts: (ev, s, h) => {
+      const amt = bridgeAmt(s);
+      return [
+        opt('bridge', `Bridge ${fm(amt)} (convertible note)`, 'Buys ~6 months; converts at a 20% discount. Needs dry powder.', { disabled: amt > followFunds(), why: 'Not enough dry powder' }),
+        needAp(opt('pivot', 'Back a pivot (2 AP)', 'Cut costs 35%, re-aim the product. High variance.', { ap: 2 })),
+        opt('sell', `Sell it — ~${fm(saleValue(s))}`, 'An acqui-hire for whatever exists.'),
+        opt('shut', 'Shut it down', 'Return what cash is left.'),
+      ];
+    },
+    resolve: (ev, id, s, h) => {
+      if (id === 'bridge') {
+        const amt = bridgeAmt(s); payFollowOn(amt);
+        const tr = addTranche(s, { kind: 'note', invested: amt, cap: Infinity, disc: 0.2, mfn: false, pref: '1x', anti: 'none' });
+        s.safes.push({ who: 'me', tid: tr.id, invested: amt, cap: Infinity, disc: 0.2, mfn: false });
+        s.cash += amt; s.fails = 1; s.distress = 0.8; s.retryOk = true; G.net += 0.2;
+        return `Bridged ${s.name} with ${fm(amt)}.`;
+      }
+      if (id === 'pivot') {
+        spendAp(2);
+        const dP = rg(s.rs, 6, 14);
+        s.h.P = clamp(s.h.P + dP, 3, 98); s.expense = s.mrr + (s.expense - s.mrr) * 0.65; s.stallUntil = G.week + 6; s.fails = 1; s.gMod = 0; s.distress = 0.8;
+        s.cash += s.expense * 1.5; // severance savings + last-ditch raise of friends and family
+        return dP > 6 ? `The pivot found something: ${s.name} is moving again.` : `The pivot is wobbling, but it bought some time.`;
+      }
+      if (id === 'sell') { const ev_ = saleValue(s); s.cash = 0; sellHolding(h, ev_, 'Acqui-hire'); return `Sold ${s.name} for ${fm(ev_)}.`; }
+      collapse(s, 'was shut down'); return `${s.name} shut down.`;
+    },
+  },
+
+  downround: {
+    title: (ev, s) => `${s.name}: down-round ultimatum`,
+    body: (ev, s, h) => {
+      const info = downInfo(s, ev);
+      return [`The raise stalled, but a new investor will lead a round at ${fm(info.pre)} pre (previous post ${fm(lastPost(s))}) — a ${Math.round((1 - info.pre / lastPost(s)) * 100)}% haircut — ${fm(info.raise)} raised.`, `Down rounds trigger anti-dilution on your earlier shares (if you negotiated it), and the founder is already unhappy.`, `Your pro-rata in this round: ${fm(info.slice)}.`];
+    },
+    opts: (ev, s, h) => {
+      const info = downInfo(s, ev);
+      return [
+        opt('support', `Support it — invest ${fm(info.slice)}`, 'Averages down; strong signal to the founder.', { disabled: info.slice < 10000 || info.slice > followFunds(), why: 'Not enough dry powder' }),
+        opt('accept', 'Let them do it', 'You get diluted, no new money from you.'),
+        opt('block', 'Block it (needs a board seat)', 'Hardball: 50% the company folds, 50% a better lifeline.', { disabled: !h.board, why: 'No board seat' }),
+      ];
+    },
+    resolve: (ev, id, s, h) => {
+      const info = downInfo(s, ev);
+      if (id === 'block') {
+        h.rel = Math.max(0, h.rel - 10);
+        if (rc(G.rng, 0.5)) { collapse(s, 'folded after a blocked rescue round'); return `You blocked the round. ${s.name} could not find another lifeline.`; }
+        closeRound(s, { pre: info.pre * 1.3, raise: info.raise, lead: 'Bridge investors', poolPct: 0.12, mine: [] });
+        afterDown(s); return `You blocked the round; a better lifeline arrived.`;
+      }
+      const mine = [];
+      if (id === 'support') { const amt = payFollowOn(info.slice); if (amt > 0) mine.push({ invested: amt, pref: '1x', anti: 'wa' }); h.rel = Math.min(100, h.rel + 4); }
+      closeRound(s, { pre: info.pre, raise: info.raise, lead: 'Bridge investors', poolPct: 0.12, mine });
+      afterDown(s);
+      return id === 'support' ? `Backed ${s.name}'s down round with ${fm(mine.length ? mine[0].invested : 0)}.` : `${s.name} closed a down round.`;
+    },
+  },
+
+  antidil: {
+    title: (ev, s) => `${s.name}: anti-dilution fight`,
+    body: (ev, s, h) => [`Your anti-dilution protection kicked in after the down round, handing you ${Math.round(sum(h.tr, t => t.adjust || 0)).toLocaleString()} extra shares.`, `The founder's cap table just got uglier. Waiving buys goodwill and morale; enforcing is within your rights.`],
+    opts: () => [opt('waive', 'Waive the adjustment', '+ relationship, + founder morale, − your ownership'), opt('enforce', 'Enforce it', '− relationship; you keep the extra shares')],
+    resolve: (ev, id, s, h) => {
+      if (id === 'waive') { for (const t of h.tr) { if (t.adjust) { t.shares -= t.adjust; t.adjust = 0; t.cp = t.invested / t.shares; } } h.rel = Math.min(100, h.rel + 10); s.h.F = Math.min(98, s.h.F + 1.5); return 'You waived anti-dilution. The founder will remember.'; }
+      h.rel = Math.max(0, h.rel - 12); G.founderRel = Math.max(0, G.founderRel - 1); return 'You enforced anti-dilution. Lawyers were involved.';
+    },
+  },
+
+  fraud: {
+    title: (ev, s) => `${s.name}: fraud revealed`,
+    body: (ev, s, h) => {
+      const cov = h.diligence || 0;
+      return [`Investigators confirm ${s.founder.name} fabricated revenue and diverted funds. The company is finished.`, cov > 0.6 ? `Because you did most of your homework, the warranties and a clawback recover a little.` : `You skipped much of the diligence; the money is gone.`, `Diligence coverage on this deal: ${Math.round(cov * 100)}%.`];
+    },
+    opts: () => [opt('ok', 'Accept the loss', 'Reputation takes a hit proportional to what you skipped.')],
+    resolve: (ev, id, s, h) => {
+      const cov = h.diligence || 0;
+      const rec = h.invested * cov * 0.22;
+      G.stats.frauds++;
+      G.rep = Math.max(0, G.rep - (0.8 + 2.2 * (1 - cov)));
+      G.lpTrust = Math.max(0, G.lpTrust - (2 + 6 * (1 - cov)));
+      s.status = 'dead'; s.deadW = G.week; s.deadWhy = 'fraud'; s.round = null;
+      writeOff(h, rec, 'was a fraud');
+      return `${s.name} was a fraud.`;
+    },
+  },
+
+  cofounder: {
+    title: (ev, s) => `${s.name}: cofounder blow-up`,
+    body: (ev, s) => [`${s.founder.name} and their cofounder are no longer speaking except through Slack reactions. Half the team is picking sides.`],
+    opts: (ev, s, h) => [
+      needAp(opt('mediate', 'Mediate (2 AP)', 'Likely works if the founder is any good.', { ap: 2 })),
+      opt('back', 'Back the CEO', 'Cofounder leaves; some knowledge walks out the door.'),
+      opt('replace', 'Replace the CEO (board)', 'New CEO. Growth stalls for two months; founder relationship craters.', { disabled: !h.board, why: 'No board seat' }),
+    ],
+    resolve: (ev, id, s, h) => {
+      if (id === 'mediate') { spendAp(2); if (rc(G.rng, 0.45 + s.h.F / 200 + G.rep / 300)) { G.rep += 0.1; return 'Mediation worked. They shook hands (awkwardly).'; } s.h.F = Math.max(3, s.h.F - 5); return 'Mediation failed. The cofounder left anyway.'; }
+      if (id === 'back') { s.h.F = Math.max(3, s.h.F - 3); s.gMod -= 0.004; return 'The cofounder left. The CEO is grateful, the codebase less so.'; }
+      s.h.F = clamp(rg(G.rng, 55, 12), 20, 90); s.stallUntil = G.week + 8; h.rel = Math.max(0, h.rel - 22); return 'You replaced the CEO. A new leader, a nervous team.';
+    },
+  },
+
+  custlost: {
+    title: (ev, s) => `${s.name}: key customer lost`,
+    body: (ev, s) => [`Their biggest customer — about a quarter of revenue — is leaving for a competitor.`],
+    opts: () => [needAp(opt('win', 'Help win them back (2 AP)', 'A call from the investor can move mountains.', { ap: 2 })), opt('accept', 'Accept it', 'MRR drops 25%.')],
+    resolve: (ev, id, s) => {
+      if (id === 'win') { spendAp(2); if (rc(G.rng, 0.5 + G.rep / 300)) { s.mrr *= 0.95; return 'You saved the account (mostly).'; } }
+      s.mrr *= 0.75; s.h.P = Math.max(3, s.h.P - 3); return 'The customer left. MRR is down 25%.';
+    },
+  },
+
+  competitor: {
+    title: (ev, s) => `${s.name}: a competitor raised a monster round`,
+    body: (ev, s) => [`A rival just announced a huge raise and is poaching customers with free pilots.`],
+    opts: () => [needAp(opt('dd', 'Help them double down (1 AP)', 'Sharper positioning, faster roadmap.', { ap: 1 })), opt('ignore', 'Ignore it', 'Hope their product is worse.')],
+    resolve: (ev, id, s) => {
+      if (id === 'dd') { spendAp(1); if (rc(G.rng, 0.6)) return 'The company held its ground.'; s.h.P = Math.max(3, s.h.P - 2); return 'You tried; the competitor still took some share.'; }
+      s.h.P = Math.max(3, s.h.P - rr(G.rng, 2, 6)); s.gMod -= 0.003; return 'The competitor took share. Growth slows.';
+    },
+  },
+
+  regulatory: {
+    title: (ev, s) => `${s.name}: regulatory trouble`,
+    body: (ev, s) => [`A regulator has sent a letter. It is polite in the way that precedes a fine.`],
+    opts: () => [opt('pay', 'Pay for good lawyers — $40k (fund)', 'Resolved cleanly.', { disabled: 40000 > followFunds(), why: 'Not enough dry powder' }), opt('ignore', 'Ignore it', '40% it blows up: growth freezes for two months.')],
+    resolve: (ev, id, s) => {
+      if (id === 'pay') { opexCall(40000); return 'Lawyers handled it. Expensive, quiet.'; }
+      if (rc(G.rng, 0.4)) { s.stallUntil = G.week + 8; s.cash -= s.expense * 0.5; return 'It blew up: a fine and a frozen quarter.'; }
+      return 'The letter went away. For now.';
+    },
+  },
+
+  poach: {
+    title: (ev, s) => `${s.name}: key hire poached`,
+    body: (ev, s) => [`The head of engineering has a counter-offer from a Big Tech company with a free-lunch problem.`],
+    opts: () => [opt('keep', 'Fund a retention package — $25k', 'Keeps the team intact.', { disabled: 25000 > followFunds(), why: 'Not enough dry powder' }), opt('let', 'Let them go', 'Team quality dips; growth stalls briefly.')],
+    resolve: (ev, id, s) => { if (id === 'keep') { opexCall(25000); return 'Retention package signed. The engineer stays.'; } s.h.F = Math.max(3, s.h.F - 3); s.stallUntil = G.week + 3; return 'The engineer left. Hiring a replacement will take a while.'; },
+  },
+
+  scandal: {
+    title: (ev, s) => `${s.name}: founder scandal`,
+    body: (ev, s) => [`${s.founder.name} is trending for the wrong reasons.${s.h.I < 45 ? ' Frankly, it is not out of character.' : ''}`],
+    opts: (ev, s, h) => [
+      opt('stand', 'Stand by the founder', 'Reputation risk; 50% customers shrug.'),
+      opt('oust', 'Push the founder out (board)', 'New CEO, founder relationship destroyed.', { disabled: !h.board, why: 'No board seat' }),
+      opt('distance', 'Quietly distance yourself', 'Small reputation cost.'),
+    ],
+    resolve: (ev, id, s, h) => {
+      if (id === 'stand') { G.rep = Math.max(0, G.rep - 0.6); if (rc(G.rng, 0.5)) { s.mrr *= 0.92; return 'The press cycle moved on, but some customers did not.'; } return 'It blew over.'; }
+      if (id === 'oust') { s.h.F = clamp(rg(G.rng, 55, 12), 20, 90); s.h.I = clamp(s.h.I + 15, 0, 98); s.stallUntil = G.week + 8; h.rel = Math.max(0, h.rel - 25); G.rep = Math.max(0, G.rep - 0.2); return 'The board acted. A new CEO takes over.'; }
+      G.rep = Math.max(0, G.rep - 0.3); h.rel = Math.max(0, h.rel - 3); return 'You kept your head down.';
+    },
+  },
+
+  acquihire: {
+    title: (ev, s) => `${s.name}: acqui-hire offer`,
+    body: (ev, s) => [`A larger company wants the team, not the product. The offer is ${fm(acqhireVal(s))}.`, `Cost basis ${fm(G.hold[s.id].invested)}. This is the "return your capital, roughly" outcome.`],
+    opts: () => [opt('sell', 'Take it', 'Realize it now.'), opt('hold', 'Decline', 'Keep swinging.')],
+    resolve: (ev, id, s, h) => { if (id === 'sell') { const v = acqhireVal(s); sellHolding(h, v, 'Acqui-hire'); return `Acqui-hired for ${fm(v)}.`; } return 'You declined the acqui-hire.'; },
+  },
+
+  exitoffer: {
+    title: (ev, s) => ev.data.kind === 'ipo' ? `${s.name}: IPO window is open` : `${s.name}: acquisition offer`,
+    body: (ev, s, h) => {
+      const d = ev.data, pay = exitPayout(s, h, d.ev), mark = holdingMark(h), M = MACRO[G.macro.regime];
+      const lines = [];
+      if (d.kind === 'ipo') lines.push(`Bankers say the window is open: ${fm(d.ev)} market cap on listing. Lock-up is 26 weeks, so you cannot sell instantly.`);
+      else lines.push(`An acquirer is offering ${fm(d.ev)} for the whole company, paid ${d.cash ? 'in cash' : 'in acquirer stock (8-week lock-up, price can fall)'}.${d.opposes ? ' The founder opposes the sale.' : ''}`);
+      lines.push(`Your share of proceeds: ${fm(pay)} on ${fm(h.invested)} invested (${fx(pay / Math.max(1, h.invested), 1)}). Current mark: ${fm(mark)}.`);
+      lines.push(`Macro: ${M.name}. Sector heat ${sectorHeat(s.sector) >= 0 ? '+' : ''}${(sectorHeat(s.sector) * 100).toFixed(0)}. ARR ${fm(arr(s))}, growing ~${(growthMo(s) * 100).toFixed(1)}%/mo.`);
+      return lines;
+    },
+    opts: (ev, s, h) => {
+      const d = ev.data;
+      if (d.kind === 'ipo') return [opt('go', 'Approve the IPO', 'Company lists; sell after lock-up.'), opt('no', 'Stay private', 'Windows close. Sometimes forever.')];
+      const o = [opt('sell', d.cash ? 'Accept — sell now' : 'Accept — take the stock', d.cash ? 'Cash proceeds hit the fund now.' : 'Proceeds become locked stock.'), opt('no', 'Decline — hold', 'The offer disappears.')];
+      if (d.opposes) { o[0] = opt('sell', 'Overrule the founder (board)', 'Accept the sale over their objection; relationship −15.'); }
+      return o;
+    },
+    resolve: (ev, id, s, h) => {
+      const d = ev.data;
+      if (id === 'no') return `You turned down ${d.kind === 'ipo' ? 'the IPO' : 'the offer'} for ${s.name}.`;
+      if (d.kind === 'ipo') {
+        goPublic(s, d.ev * rr(G.rng, 1.0, 1.15), 0.045); h.lockUntil = G.week + 26;
+        logMsg(`${s.name} IPO'd at ${fm(s.mcap)}. Your shares unlock in 26 weeks.`, 'good'); G.rep = Math.min(100, G.rep + 1);
+        return `${s.name} went public.`;
+      }
+      if (d.opposes) h.rel = Math.max(0, h.rel - 15);
+      if (d.cash) { sellHolding(h, d.ev, 'Acquisition'); return `Sold ${s.name} for ${fm(d.ev)}.`; }
+      goPublic(s, d.ev * 0.98, 0.035); h.lockUntil = G.week + 8; h.stockDeal = true;
+      logMsg(`${s.name} was acquired for stock. You hold shares, locked for 8 weeks.`, 'info');
+      return `Accepted the stock deal for ${s.name}.`;
+    },
+  },
+
+  lpliquidity: {
+    title: () => 'An LP wants early liquidity',
+    body: () => { const a = lpAsk(); return [`One of your LPs has a cash crunch and wants out of ${fm(a)} of their commitment early. LPs have long memories about this sort of thing.`]; },
+    opts: () => { const a = lpAsk(); return [
+      needAp(opt('buyer', 'Find a secondary buyer (2 AP)', '70% you pull it off. LP trust +3.', { ap: 2 })),
+      opt('own', `Buy them out yourself — ${fm(a)} personal`, 'Costs personal cash. LP trust +6.', { disabled: a > G.cash, why: 'Not enough personal cash' }),
+      opt('no', 'Decline', 'LP trust −4.'),
+    ]; },
+    resolve: (ev, id) => {
+      const a = lpAsk();
+      if (id === 'buyer') { spendAp(2); if (rc(G.rng, 0.7)) { G.lpTrust = Math.min(100, G.lpTrust + 3); return 'You found a buyer. The LP sends a bottle of wine.'; } G.lpTrust = Math.max(0, G.lpTrust - 1); return 'No buyer at a sensible price. The LP is disappointed.'; }
+      if (id === 'own') { G.cash -= a; G.lpTrust = Math.min(100, G.lpTrust + 6); return `You bought out the LP for ${fm(a)}.`; }
+      G.lpTrust = Math.max(0, G.lpTrust - 4); return 'You declined. The LP will remember.';
+    },
+  },
+
+  leak: {
+    title: () => 'Term sheet leak',
+    body: (ev, s) => [`Someone at a co-investor leaked the terms of your ${s ? s.name : 'latest'} deal to a newsletter.`],
+    opts: () => [needAp(opt('apol', 'Get ahead of it (1 AP)', 'Reputation −0.3', { ap: 1 })), opt('ignore', 'Ignore it', 'Reputation −1.2')],
+    resolve: (ev, id) => { if (id === 'apol') { spendAp(1); G.rep = Math.max(0, G.rep - 0.3); return 'You wrote a gracious note. Mostly forgotten.'; } G.rep = Math.max(0, G.rep - 1.2); return 'The leak stung your reputation.'; },
+  },
+};
+
+function lpAsk() { return Math.round(G.size * 0.03 / 5000) * 5000; }
+function acqhireVal(s) { if (!s._ah || s._ah.w !== G.week) s._ah = { w: G.week, v: acqhireEV(s) * 1.1 }; return s._ah.v; }
+function downInfo(s, ev) {
+  const h = G.hold[s.id];
+  if (!ev.data.pre) {
+    const pre = lastPost(s) * rr(s.rs, 0.4, 0.6), k = s.done + 1;
+    const raise = Math.max(stg(k).raise * 0.3, netBurn(s) * 12);
+    ev.data.pre = pre; ev.data.raise = raise;
+  }
+  const pre = ev.data.pre, raise = ev.data.raise;
+  const own = ownPct(s, h);
+  return { pre, raise, slice: Math.round(own * raise / 5000) * 5000 };
+}
+function afterDown(s) {
+  if (s.antiTriggered) { s.antiTriggered = false; pushEvent('antidil', s.id); }
+  s.stallUntil = G.week + 4;
+}
+
+// ---- generic API for UI/bots ----
+function eventCtx(ev) { const s = ev.sid ? G.startups[ev.sid] : null; const h = ev.sid ? G.hold[ev.sid] : null; return [ev, s, h]; }
+function eventView(ev) {
+  const def = EVENT_DEFS[ev.type], ctx = eventCtx(ev);
+  return { title: def.title.apply(null, ctx), body: def.body.apply(null, ctx), opts: def.opts.apply(null, ctx) };
+}
+function resolveEvent(ev, id) {
+  const def = EVENT_DEFS[ev.type], ctx = eventCtx(ev);
+  const idx = G.queue.indexOf(ev); if (idx >= 0) G.queue.splice(idx, 1);
+  const msg = def.resolve.apply(null, [ev, id, ctx[1], ctx[2]]);
+  if (msg) { logMsg(msg, 'info'); }
+  return msg;
+}
+function eventValid(ev) {
+  // drop events whose subject disappeared
+  if (ev.sid) { const s = G.startups[ev.sid], h = G.hold[ev.sid]; if (!s || !h || h.status !== 'active' || s.status === 'dead') return false; if (ev.type !== 'followon' && s.status !== 'private' && ev.type !== 'exitoffer') return false; if (ev.type === 'followon' && !s.round) return false; }
+  return true;
+}
+
+// ============================================================================
+// UI TOOLKIT: immediate-mode widgets on Canvas 2D (1280x720 logical space)
+// ============================================================================
+const W = 1280, H = 720;
+const C = {
+  bg: '#0d131b', bg2: '#111a24', panel: '#17222e', panel2: '#1e2d3c', panel3: '#26384a', line: '#2c4054', text: '#e0e8f0', dim: '#93a8bc', faint: '#5f768b',
+  gold: '#f2b84b', goldD: '#a77a1f', green: '#4cc38a', red: '#ef6461', blue: '#5cb4ff', purple: '#b79cff', amber: '#ffb45c', teal: '#4fd1b5',
+};
+const FONT = 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
+
+let cv = null, ctx = null;
+const UI = {
+  mx: -1, my: -1, down: false, pressed: false, released: false, wheel: 0, rightClick: false,
+  active: null, disabled: 0, ox: 0, oy: 0, clips: [], tips: [], cursor: 'default', focus: null, keyQ: [],
+  t: 0, dt: 0, toasts: [], stamp: null, hover: null, textBuf: {}, stack: [],
+};
+const S = { screen: 'title', tab: 'pipeline', modal: null, dealId: 0, selHold: 0, scroll: {}, setup: null, hq: null, menu: false, help: false, coldIdx: 0, sound: true, dealView: {}, evSel: null };
+
+// ---------- primitives ----------
+function rrect(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function box(x, y, w, h, fill, stroke, r) {
+  rrect(x, y, w, h, r == null ? 6 : r);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+}
+function fontStr(size, weight, mono) { return `${weight || 400} ${size}px ${mono ? MONO : FONT}`; }
+const _mc = new Map();
+function measure(str, size, weight, mono) {
+  const k = size + '|' + weight + '|' + (mono ? 1 : 0) + '|' + str;
+  let v = _mc.get(k);
+  if (v === undefined) { ctx.font = fontStr(size, weight, mono); v = ctx.measureText(str).width; if (_mc.size > 6000) _mc.clear(); _mc.set(k, v); }
+  return v;
+}
+function fitText(str, maxW, size, weight, mono) {
+  if (measure(str, size, weight, mono) <= maxW) return str;
+  let lo = 0, hi = str.length;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (measure(str.slice(0, mid) + '…', size, weight, mono) <= maxW) lo = mid; else hi = mid - 1; }
+  return str.slice(0, lo) + '…';
+}
+// T: draw text. y is the vertical middle of the line.
+function T(str, x, y, o) {
+  o = o || {};
+  const size = o.s || 13, weight = o.w || 400;
+  str = String(str);
+  if (o.maxW) str = fitText(str, o.maxW, size, weight, o.mono);
+  ctx.font = fontStr(size, weight, o.mono);
+  ctx.fillStyle = o.c || C.text; ctx.textAlign = o.a || 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(str, x, y);
+  return measure(str, size, weight, o.mono);
+}
+function wrapLines(str, maxW, size, weight) {
+  const out = [];
+  for (const para of String(str).split('\n')) {
+    const words = para.split(' '); let line = '';
+    for (const wd of words) {
+      const t = line ? line + ' ' + wd : wd;
+      if (measure(t, size, weight) > maxW && line) { out.push(line); line = wd; } else line = t;
+    }
+    out.push(line);
+  }
+  return out;
+}
+// paragraph: returns height used
+function P(str, x, y, w, o) {
+  o = o || {}; const size = o.s || 13, lh = o.lh || Math.round(size * 1.45);
+  const lines = wrapLines(str, w, size, o.w || 400);
+  for (let i = 0; i < lines.length; i++) T(lines[i], x, y + lh * i + lh / 2, { s: size, c: o.c, w: o.w, a: o.a });
+  return lines.length * lh;
+}
+function paraH(str, w, size, lh) { size = size || 13; return wrapLines(str, w, size, 400).length * (lh || Math.round(size * 1.45)); }
+
+function hit(x, y, w, h) {
+  if (UI.disabled > 0) return false;
+  const ax = x + UI.ox, ay = y + UI.oy;
+  if (UI.mx < ax || UI.mx >= ax + w || UI.my < ay || UI.my >= ay + h) return false;
+  const c = UI.clips[UI.clips.length - 1];
+  if (c && (UI.mx < c[0] || UI.mx >= c[2] || UI.my < c[1] || UI.my >= c[3])) return false;
+  return true;
+}
+function tip(x, y, w, h, text) { if (text && hit(x, y, w, h)) UI.tips.push(text); }
+
+// ---------- widgets ----------
+function panel(x, y, w, h, title, o) {
+  o = o || {};
+  box(x, y, w, h, o.fill || C.panel, o.stroke || C.line, o.r == null ? 8 : o.r);
+  if (title) { T(title, x + 14, y + 17, { s: 12, w: 700, c: o.tc || C.dim }); }
+}
+const BTN = {
+  primary: { bg: C.gold, bgH: '#ffcb62', fg: '#1a1305', bd: C.gold },
+  ghost: { bg: C.panel2, bgH: C.panel3, fg: C.text, bd: C.line },
+  danger: { bg: '#4a2328', bgH: '#62303a', fg: '#ffb4b2', bd: '#7a3a40' },
+  good: { bg: '#1c4535', bgH: '#26604a', fg: '#a8f0cc', bd: '#2f7a5c' },
+  tab: { bg: 'rgba(0,0,0,0)', bgH: C.panel2, fg: C.dim, bd: 'rgba(0,0,0,0)' },
+  tabOn: { bg: C.panel2, bgH: C.panel3, fg: C.text, bd: C.line },
+};
+function button(id, x, y, w, h, label, o) {
+  o = o || {};
+  const st = BTN[o.kind || 'ghost'];
+  const dis = !!o.disabled;
+  const hv = !dis && hit(x, y, w, h);
+  let clicked = false;
+  if (hv) {
+    UI.cursor = 'pointer';
+    if (UI.pressed) UI.active = id;
+    if (UI.released && UI.active === id) { clicked = true; UI.active = null; }
+  }
+  if (dis && hit(x, y, w, h) && o.why) UI.tips.push(o.why);
+  else if (hv && o.tip) UI.tips.push(o.tip);
+  const down = hv && UI.down && UI.active === id;
+  ctx.globalAlpha = dis ? 0.42 : 1;
+  box(x, y + (down ? 1 : 0), w, h, hv ? st.bgH : st.bg, st.bd, o.r == null ? 6 : o.r);
+  if (o.sub) {
+    T(label, o.a === 'left' ? x + 12 : x + w / 2, y + h / 2 - 7 + (down ? 1 : 0), { s: o.s || 13, w: 700, c: st.fg, a: o.a === 'left' ? 'left' : 'center', maxW: w - 20 });
+    T(o.sub, o.a === 'left' ? x + 12 : x + w / 2, y + h / 2 + 9 + (down ? 1 : 0), { s: 10.5, c: o.kind === 'primary' ? '#4a3a12' : C.dim, a: o.a === 'left' ? 'left' : 'center', maxW: w - 20 });
+  } else T(label, o.a === 'left' ? x + 12 : x + w / 2, y + h / 2 + (down ? 1 : 0), { s: o.s || 13, w: o.w || 600, c: st.fg, a: o.a === 'left' ? 'left' : 'center', maxW: w < 44 ? w : w - 16 });
+  ctx.globalAlpha = 1;
+  if (clicked) sfx('click');
+  return clicked;
+}
+function chip(x, y, label, col, o) {
+  o = o || {}; const s = o.s || 10.5;
+  const w = measure(label, s, 700) + 12;
+  box(x, y, w, 17, o.fill || 'rgba(255,255,255,0.06)', col || C.line, 8);
+  T(label, x + w / 2, y + 8.5, { s, w: 700, c: col || C.dim, a: 'center' });
+  return w;
+}
+function bar(x, y, w, h, frac, col, bg) {
+  box(x, y, w, h, bg || C.bg, null, h / 2);
+  frac = clamp(frac, 0, 1);
+  if (frac > 0.001) box(x, y, Math.max(h, w * frac), h, col || C.gold, null, h / 2);
+}
+function toggle(id, x, y, label, val, o) {
+  o = o || {};
+  const w = o.w || (measure(label, 12.5, 600) + 36);
+  const hv = hit(x, y, w, 22); let ch = false;
+  if (hv) { UI.cursor = 'pointer'; if (UI.pressed) UI.active = id; if (UI.released && UI.active === id) { ch = true; UI.active = null; sfx('click'); } }
+  if (hv && o.tip) UI.tips.push(o.tip);
+  box(x, y + 3, 30, 16, val ? C.green : C.panel3, null, 8);
+  ctx.beginPath(); ctx.arc(val ? x + 22 : x + 8, y + 11, 6, 0, 6.3); ctx.fillStyle = '#fff'; ctx.fill();
+  T(label, x + 38, y + 11, { s: 12.5, w: 600, c: val ? C.text : C.dim });
+  return ch ? !val : val;
+}
+function slider(id, x, y, w, val, min, max, step, o) {
+  o = o || {};
+  const hv = hit(x - 6, y - 8, w + 12, 24);
+  if (hv) { UI.cursor = 'pointer'; if (UI.pressed) UI.active = id; }
+  if (UI.active === id && UI.down) {
+    const f = clamp((UI.mx - UI.ox - x) / w, 0, 1);
+    val = min + f * (max - min);
+    if (step) val = Math.round(val / step) * step;
+    val = clamp(val, min, max);
+  }
+  if (!UI.down && UI.active === id) UI.active = null;
+  const f = max > min ? (val - min) / (max - min) : 0;
+  box(x, y + 2, w, 6, C.bg, C.line, 3);
+  box(x, y + 2, Math.max(6, w * f), 6, o.col || C.gold, null, 3);
+  ctx.beginPath(); ctx.arc(x + w * f, y + 5, 8, 0, 6.3); ctx.fillStyle = '#f4f7fa'; ctx.fill(); ctx.strokeStyle = C.line; ctx.stroke();
+  return val;
+}
+// stepper: [-] value [+]
+function stepper(id, x, y, w, label, value, canDec, canInc) {
+  let d = 0;
+  T(label, x, y + 11, { s: 12, c: C.dim });
+  if (button(id + '-', x + w - 124, y, 24, 22, '−', { disabled: !canDec, w: 700 })) d = -1;
+  T(value, x + w - 72, y + 11, { s: 12.5, w: 700, a: 'center' });
+  if (button(id + '+', x + w - 24, y, 24, 22, '+', { disabled: !canInc, w: 700 })) d = 1;
+  return d;
+}
+function input(id, x, y, w, h, value, o) {
+  o = o || {};
+  const hv = hit(x, y, w, h);
+  if (hv) { UI.cursor = 'text'; if (UI.pressed) UI.focus = id; }
+  else if (UI.pressed && UI.focus === id) UI.focus = null;
+  const foc = UI.focus === id;
+  if (foc) {
+    for (const k of UI.keyQ) {
+      if (k === 'Backspace') value = value.slice(0, -1);
+      else if (k.length === 1 && value.length < (o.max || 24) && (!o.re || o.re.test(k))) value += k;
+    }
+    UI.keyQ.length = 0;
+  }
+  box(x, y, w, h, C.bg, foc ? C.gold : C.line, 6);
+  T(value + (foc && Math.floor(UI.t * 2) % 2 === 0 ? '|' : ''), x + 10, y + h / 2, { s: 13, mono: o.mono, maxW: w - 20 });
+  return value;
+}
+function beginScroll(id, x, y, w, h, contentH) {
+  const max = Math.max(0, contentH - h);
+  let sc = S.scroll[id] || 0;
+  if (hit(x, y, w, h) && UI.wheel) { sc = clamp(sc + UI.wheel, 0, max); UI.wheel = 0; }
+  sc = clamp(sc, 0, max); S.scroll[id] = sc;
+  ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip(); ctx.translate(0, -sc);
+  UI.stack.push([UI.ox, UI.oy]);
+  UI.clips.push([x + UI.ox, y + UI.oy, x + w + UI.ox, y + h + UI.oy]);
+  UI.oy -= sc;
+  return sc;
+}
+function endScroll(id, x, y, w, h, contentH) {
+  UI.clips.pop(); const [ox, oy] = UI.stack.pop(); UI.ox = ox; UI.oy = oy;
+  ctx.restore();
+  if (contentH > h) {
+    const f = h / contentH, sc = S.scroll[id] || 0, max = contentH - h;
+    box(x + w - 5, y + 2 + (h - 4) * (sc / max) * (1 - f), 4, Math.max(18, (h - 4) * f), 'rgba(255,255,255,0.18)', null, 2);
+  }
+}
+function lineChart(x, y, w, h, series, o) {
+  o = o || {};
+  let xmin = o.xmin != null ? o.xmin : Infinity, xmax = o.xmax != null ? o.xmax : -Infinity, ymin = o.ymin != null ? o.ymin : Infinity, ymax = o.ymax != null ? o.ymax : -Infinity;
+  for (const s of series) for (const p of s.pts) { if (o.xmin == null) xmin = Math.min(xmin, p[0]); if (o.xmax == null) xmax = Math.max(xmax, p[0]); if (o.ymin == null) ymin = Math.min(ymin, p[1]); if (o.ymax == null) ymax = Math.max(ymax, p[1]); }
+  if (!isFinite(xmin)) { xmin = 0; xmax = 1; } if (!isFinite(ymin)) { ymin = 0; ymax = 1; }
+  if (xmax <= xmin) xmax = xmin + 1; if (ymax <= ymin) ymax = ymin + 1;
+  const px = v => x + 34 + (v - xmin) / (xmax - xmin) * (w - 44), py = v => y + h - 18 - (v - ymin) / (ymax - ymin) * (h - 28);
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1;
+  const ticks = o.ticks || 4;
+  for (let i = 0; i <= ticks; i++) {
+    const v = ymin + (ymax - ymin) * i / ticks, yy = py(v);
+    ctx.globalAlpha = 0.5; ctx.beginPath(); ctx.moveTo(x + 34, yy); ctx.lineTo(x + w - 10, yy); ctx.stroke(); ctx.globalAlpha = 1;
+    T(o.yfmt ? o.yfmt(v) : v.toFixed(1), x + 28, yy, { s: 10, c: C.faint, a: 'right' });
+  }
+  if (o.hline != null && o.hline > ymin && o.hline < ymax) { ctx.strokeStyle = C.faint; ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(x + 34, py(o.hline)); ctx.lineTo(x + w - 10, py(o.hline)); ctx.stroke(); ctx.setLineDash([]); }
+  const xt = o.xticks || 5;
+  for (let i = 0; i <= xt; i++) { const v = xmin + (xmax - xmin) * i / xt; T(o.xfmt ? o.xfmt(v) : Math.round(v), px(v), y + h - 5, { s: 10, c: C.faint, a: 'center' }); }
+  for (const s of series) {
+    if (!s.pts.length) continue;
+    ctx.strokeStyle = s.col; ctx.lineWidth = s.lw || 2; ctx.lineJoin = 'round'; ctx.beginPath();
+    s.pts.forEach((p, i) => { const X = px(p[0]), Y = py(clamp(p[1], ymin, ymax)); if (i) ctx.lineTo(X, Y); else ctx.moveTo(X, Y); });
+    ctx.stroke();
+    const last = s.pts[s.pts.length - 1];
+    ctx.fillStyle = s.col; ctx.beginPath(); ctx.arc(px(last[0]), py(clamp(last[1], ymin, ymax)), 3, 0, 6.3); ctx.fill();
+  }
+}
+
+// ---------- toasts / stamps ----------
+function flash(text, kind) { UI.toasts.push({ t: text, k: kind || 'info', born: UI.t }); if (UI.toasts.length > 5) UI.toasts.shift(); }
+function stampFx(text, col) { UI.stamp = { text, col, born: UI.t }; }
+function drawToasts() {
+  let y = 92;
+  UI.toasts = UI.toasts.filter(t => UI.t - t.born < 4.2);
+  for (const t of UI.toasts) {
+    const age = UI.t - t.born, a = age < 0.2 ? age / 0.2 : age > 3.6 ? Math.max(0, 1 - (age - 3.6) / 0.6) : 1;
+    const col = t.k === 'good' ? C.green : t.k === 'bad' ? C.red : t.k === 'warn' ? C.amber : C.blue;
+    const w = Math.min(420, measure(t.t, 13, 600) + 30);
+    ctx.globalAlpha = a;
+    box(W - w - 16, y, w, 34, '#0b1118', col, 8);
+    ctx.fillStyle = col; ctx.fillRect(W - w - 16, y + 6, 3, 22);
+    T(t.t, W - w - 4, y + 17, { s: 13, w: 600, maxW: w - 24 });
+    ctx.globalAlpha = 1; y += 40;
+  }
+  if (UI.stamp) {
+    const age = UI.t - UI.stamp.born;
+    if (age > 1.6) UI.stamp = null;
+    else {
+      const a = age < 0.1 ? age / 0.1 : age > 1.2 ? 1 - (age - 1.2) / 0.4 : 1, sc = age < 0.18 ? 1.5 - age / 0.18 * 0.5 : 1;
+      ctx.save(); ctx.globalAlpha = a * 0.92; ctx.translate(W / 2, H / 2); ctx.rotate(-0.13); ctx.scale(sc, sc);
+      ctx.lineWidth = 6; ctx.strokeStyle = UI.stamp.col; const tw = measure(UI.stamp.text, 64, 900) + 60;
+      rrect(-tw / 2, -50, tw, 100, 10); ctx.stroke(); ctx.font = fontStr(64, 900); ctx.fillStyle = UI.stamp.col; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(UI.stamp.text, 0, 3);
+      ctx.restore(); ctx.globalAlpha = 1;
+    }
+  }
+}
+function drawTips() {
+  if (!UI.tips.length) return;
+  const text = UI.tips[UI.tips.length - 1];
+  const w = Math.min(340, Math.max(...wrapLines(text, 320, 12, 400).map(l => measure(l, 12, 400))) + 20), h = paraH(text, 320, 12, 16) + 14;
+  let x = UI.mx + 14, y = UI.my + 16;
+  if (x + w > W - 6) x = UI.mx - w - 10; if (y + h > H - 6) y = UI.my - h - 8;
+  box(x, y, w, h, '#0a0f15', C.gold, 6);
+  P(text, x + 10, y + 7, 320, { s: 12, lh: 16, c: C.text });
+}
+
+// ---------- sound ----------
+let _ac = null;
+function sfx(name) {
+  if (!S.sound) return;
+  try {
+    if (!_ac) _ac = new (window.AudioContext || window.webkitAudioContext)();
+    const t0 = _ac.currentTime, seq = { click: [[660, 0.03]], good: [[523, 0.09], [659, 0.09], [784, 0.16]], bad: [[220, 0.14], [165, 0.22]], warn: [[440, 0.08], [440, 0.08]], turn: [[392, 0.05]], stamp: [[196, 0.05], [147, 0.1]] }[name];
+    if (!seq) return;
+    let t = t0;
+    for (const [f, d] of seq) {
+      const o = _ac.createOscillator(), g = _ac.createGain();
+      o.type = name === 'bad' ? 'sawtooth' : 'triangle'; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.06, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+      o.connect(g); g.connect(_ac.destination); o.start(t); o.stop(t + d + 0.02); t += d;
+    }
+  } catch (e) { /* audio is optional */ }
+}
+
+// ---------- shared drawing helpers ----------
+function sectorDot(x, y, sid, r) { ctx.fillStyle = SECTOR_BY_ID[sid].col; ctx.beginPath(); ctx.arc(x, y, r || 4, 0, 6.3); ctx.fill(); }
+function ratingWord(m) { return m >= 72 ? 'Strong' : m >= 58 ? 'Good' : m >= 44 ? 'Mixed' : m >= 30 ? 'Weak' : 'Poor'; }
+function ratingCol(m) { return m >= 62 ? C.green : m >= 45 ? C.gold : C.red; }
+function logCol(k) { return k === 'good' ? C.green : k === 'bad' ? C.red : k === 'warn' ? C.amber : C.faint; }
+
+// ============================================================================
+// SCREENS A: frame, setup, pipeline, deal room (diligence, HQ visit, term sheet)
+// ============================================================================
+
+const TABS = [['pipeline', 'Pipeline'], ['portfolio', 'Portfolio'], ['fund', 'Fund'], ['office', 'Office'], ['market', 'Market']];
+
+function act(res) {
+  if (!res) return res;
+  if (res.ok === false && res.msg) { flash(res.msg, 'warn'); sfx('warn'); }
+  else if (res.ok && res.msg && !res.silent) flash(res.msg, res.won === false ? 'bad' : 'good');
+  return res;
+}
+
+// ---------------------------------------------------------------- frame
+function drawFrame() {
+  box(0, 0, W, 50, C.bg2, null, 0);
+  ctx.fillStyle = C.line; ctx.fillRect(0, 50, W, 1);
+  T(G.fundName, 16, 17, { s: 15, w: 800, c: C.gold, maxW: 230 });
+  T(`${dateStr(G.week)}  ·  ${calStr(G.week)}`, 16, 36, { s: 11.5, c: C.dim });
+  // AP pips
+  T('AP', 262, 25, { s: 11, w: 800, c: C.dim });
+  for (let i = 0; i < AP_BASE; i++) {
+    const cx = 292 + i * 18, on = i < G.ap;
+    ctx.beginPath(); ctx.arc(cx, 25, 6.5, 0, 6.3);
+    if (on) { ctx.fillStyle = C.gold; ctx.fill(); } else { ctx.strokeStyle = C.faint; ctx.lineWidth = 1.5; ctx.stroke(); }
+  }
+  tip(255, 8, 230, 34, `Action points: ${G.ap} of ${AP_BASE} left this week. Every pipeline move, diligence tool, visit and portfolio favour costs AP.${G.apDebt ? ' Next week you lose ' + G.apDebt + ' AP to travel/board duties.' : ''}`);
+  if (G.apDebt > 0) T(`−${G.apDebt} next wk`, 470, 25, { s: 10.5, c: C.amber });
+  const m = fundMetrics();
+  let x = 560;
+  for (const [lab, val, col] of [['TVPI', fx(m.tvpi), m.tvpi >= 1 ? C.green : C.amber], ['DPI', fx(m.dpi), C.text], ['NAV', fm(m.netNav), C.text], ['CASH', fm(G.cash), G.cash < 20000 ? C.red : C.text]]) {
+    T(lab, x, 17, { s: 10, w: 800, c: C.faint }); T(val, x, 35, { s: 15, w: 700, c: col, mono: true }); x += Math.max(78, measure(val, 15, 700, true) + 22);
+  }
+  tip(560, 6, 300, 40, 'Net TVPI (marks + distributions, after fees and accrued carry), DPI (cash returned), net NAV, and your personal cash. The J-curve is real.');
+  const M = MACRO[G.macro.regime];
+  chip(x + 4, 17, M.name, M.col); tip(x + 4, 17, 110, 17, `Macro regime: ${M.name}. Rates ${M.rate}. Drives valuations, exit multiples and IPO windows.`);
+  // controls
+  const busy = G.queue.length > 0;
+  if (button('end', W - 150, 8, 136, 34, 'End week ▶', { kind: 'primary', disabled: busy, why: 'Resolve the pending decision first.', tip: 'Advance one week (Space). Unspent AP is lost.', w: 800 })) doEndTurn();
+  if (button('skip', W - 232, 8, 74, 34, '+4 wks', { disabled: busy, why: 'Resolve the pending decision first.', tip: 'Fast-forward up to 4 weeks. Stops if a decision comes up.' })) doSkip(4);
+  if (button('menu', W - 306, 8, 66, 34, 'Menu', {})) S.menu = true;
+  if (button('help', W - 340, 8, 28, 34, '?', { w: 800 })) S.help = true;
+  // tabs
+  let tx = 14;
+  const counts = { pipeline: G.deals.filter(d => d.status === 'open').length, portfolio: activeHoldings().length };
+  for (const [id, label] of TABS) {
+    const lab = counts[id] != null ? `${label}  ${counts[id]}` : label;
+    if (button('tab-' + id, tx, 56, 118, 28, lab, { kind: S.tab === id ? 'tabOn' : 'tab', w: 700, r: 6 })) S.tab = id;
+    tx += 122;
+  }
+  T(`Dry powder ${fm(dryPowder())}   ·   Initial-check budget ${fm(Math.max(0, generalPowder()))}   ·   Reserves ${fm(G.reserveLeft)}`, W - 16, 70, { s: 11.5, c: C.dim, a: 'right' });
+  // footer log
+  ctx.fillStyle = C.bg2; ctx.fillRect(0, 676, W, 44); ctx.fillStyle = C.line; ctx.fillRect(0, 676, W, 1);
+  const lg = G.log.slice(-2);
+  lg.forEach((e, i) => {
+    const y = 688 + i * 18;
+    ctx.fillStyle = logCol(e.k); ctx.beginPath(); ctx.arc(20, y, 3.5, 0, 6.3); ctx.fill();
+    T(`Wk ${e.w + 1}`, 32, y, { s: 11, c: C.faint, mono: true });
+    T(e.t, 86, y, { s: 12.5, c: i === lg.length - 1 ? C.text : C.dim, maxW: 1060 });
+  });
+  T('Space: end week · 1-5: tabs · Esc: close', W - 14, 706, { s: 10.5, c: C.faint, a: 'right' });
+}
+
+// ---------------------------------------------------------------- setup
+function initSetup() {
+  S.setup = {
+    seed: String(Math.floor(Math.random() * 900000 + 100000)), name: 'Bad Haircut Ventures', home: 'sf', size: 5e6, reserve: 0.35,
+    smin: 0, smax: 1, sectors: ['ai', 'saas'], geo: 'region', check: 0.05,
+  };
+}
+function drawSetup() {
+  const u = S.setup;
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+  // left hero
+  T('TERM SHEET', 48, 70, { s: 44, w: 900, c: C.gold });
+  T('Coffee Inc., with the coffee deleted.', 50, 108, { s: 15, c: C.dim });
+  P('You are a solo angel with $250k, a promising Rolodex and a bad haircut. Raise Fund I, find the next category-defining company before anyone else, and try not to get scammed on the way. The only product is returns.', 50, 132, 330, { s: 13.5, c: C.text });
+  panel(48, 270, 332, 234, 'HOW A WEEK WORKS');
+  const lines = ['10 action points (AP) per week.', 'Source → Screen → Meet → Diligence → Term sheet.', 'Every move, tool and favour costs AP.', 'Hidden stats are seen through noisy tools.', 'Diligence beats vibes. Frauds exist.', 'Score = net IRR, TVPI and DPI at year 10.'];
+  lines.forEach((l, i) => { ctx.fillStyle = C.gold; ctx.beginPath(); ctx.arc(66, 308 + i * 30, 3, 0, 6.3); ctx.fill(); T(l, 80, 308 + i * 30, { s: 12.5, maxW: 290 }); });
+  T('Phase 1 build · single file · works offline', 50, 690, { s: 11, c: C.faint });
+  // right: form
+  const fx_ = 420;
+  panel(fx_, 28, 820, 664, null);
+  T('Set up Fund I', fx_ + 20, 54, { s: 20, w: 800 });
+  T('Fund name', fx_ + 20, 92, { s: 11, w: 700, c: C.dim });
+  u.name = input('in-name', fx_ + 20, 102, 300, 30, u.name, { max: 28 });
+  T('Seed (same seed = same startups)', fx_ + 340, 92, { s: 11, w: 700, c: C.dim });
+  u.seed = input('in-seed', fx_ + 340, 102, 190, 30, u.seed, { max: 14, mono: true });
+  if (button('dice', fx_ + 538, 102, 60, 30, 'Roll', {})) u.seed = String(Math.floor(Math.random() * 900000 + 100000));
+  // home city
+  T('Home city (your local network, cheap local visits)', fx_ + 20, 154, { s: 11, w: 700, c: C.dim });
+  CITIES.forEach((c, i) => { if (button('city' + c.id, fx_ + 20 + i * 112, 164, 106, 32, c.name, { kind: u.home === c.id ? 'primary' : 'ghost', s: 12, sub: REGION_NAMES[c.region] })) u.home = c.id; });
+  // fund size
+  T('Fund size (2% fee, 20% carry, 10 years; you commit 2%)', fx_ + 20, 218, { s: 11, w: 700, c: C.dim });
+  [[3e6, 'Micro $3M', 'fee $60k/yr'], [5e6, 'Standard $5M', 'fee $100k/yr'], [10e6, 'Large $10M', 'fee $200k/yr · GP commit $200k']].forEach((o, i) => {
+    if (button('size' + i, fx_ + 20 + i * 196, 228, 188, 40, o[1], { kind: u.size === o[0] ? 'primary' : 'ghost', sub: o[2] })) u.size = o[0];
+  });
+  T('Reserves held back for follow-ons', fx_ + 620, 218, { s: 11, w: 700, c: C.dim });
+  [[0.2, '20%'], [0.35, '35%'], [0.5, '50%']].forEach((o, i) => { if (button('res' + i, fx_ + 620 + i * 62, 228, 58, 40, o[1], { kind: u.reserve === o[0] ? 'primary' : 'ghost' })) u.reserve = o[0]; });
+  tip(fx_ + 620, 228, 190, 40, 'Initial checks may only use money outside the reserve. Reserves protect you from being diluted out of your winners.');
+  // thesis
+  T('FUND THESIS — deals that fit arrive more often and diligence faster; drifting costs LP trust', fx_ + 20, 296, { s: 11, w: 800, c: C.gold });
+  T('Stage range', fx_ + 20, 316, { s: 12, w: 700, c: C.dim });
+  const stNames = STAGES.map(s => s.short);
+  let d = stepper('smin', fx_ + 20, 326, 300, 'From', stNames[u.smin], u.smin > 0, u.smin < u.smax); if (d) u.smin += d;
+  d = stepper('smax', fx_ + 20, 354, 300, 'To', stNames[u.smax], u.smax > u.smin, u.smax < 5); if (d) u.smax += d;
+  T('Geography', fx_ + 350, 316, { s: 12, w: 700, c: C.dim });
+  [['local', 'Home city only'], ['region', 'Home region'], ['global', 'Global']].forEach((o, i) => { if (button('geo' + o[0], fx_ + 350 + i * 150, 326, 144, 28, o[1], { kind: u.geo === o[0] ? 'primary' : 'ghost', s: 12 })) u.geo = o[0]; });
+  T('Flights between regions take two turns and risk delays. Home-city visits are cheap.', fx_ + 350, 372, { s: 11, c: C.faint });
+  T('Sectors (pick 1–3)', fx_ + 20, 398, { s: 12, w: 700, c: C.dim });
+  SECTORS.forEach((sc, i) => {
+    const on = u.sectors.includes(sc.id), x = fx_ + 20 + (i % 4) * 190, y = 410 + Math.floor(i / 4) * 38;
+    if (button('sec' + sc.id, x, y, 182, 32, sc.name, { kind: on ? 'primary' : 'ghost', disabled: !on && u.sectors.length >= 3, why: 'Three sectors max.' })) {
+      if (on && u.sectors.length > 1) u.sectors = u.sectors.filter(z => z !== sc.id); else if (!on) u.sectors.push(sc.id);
+    }
+    sectorDot(x + 14, y + 16, sc.id, 4);
+  });
+  T('Typical initial check', fx_ + 20, 498, { s: 12, w: 700, c: C.dim });
+  [[0.03, 'Spray', '3% of fund · ~25 bets'], [0.05, 'Diversified', '5% of fund · ~15 bets'], [0.08, 'Balanced', '8% · ~9 bets'], [0.15, 'Concentrated', '15% · ~5 bets']].forEach((o, i) => {
+    if (button('chk' + i, fx_ + 20 + i * 196, 508, 188, 42, o[1], { kind: u.check === o[0] ? 'primary' : 'ghost', sub: o[2] })) u.check = o[0];
+  });
+  tip(fx_ + 20, 508, 780, 42, '15 bets at 5% each has lower variance; 6 bets at 15% each has a higher ceiling — and one bad year can end you.');
+  // summary
+  const invest = u.size * 0.78, init = invest * (1 - u.reserve);
+  panel(fx_ + 20, 568, 780, 72, null, { fill: C.bg2 });
+  T(`Investable ≈ ${fm(invest)}  ·  Initial checks ≈ ${fm(init)}  ·  ≈ ${Math.max(1, Math.round(init / (u.size * u.check)))} initial bets  ·  Reserves ${fm(invest * u.reserve)}`, fx_ + 36, 590, { s: 13, w: 600 });
+  T(`Your capital: $250k − ${fm(u.size * 0.02)} GP commit = ${fm(250000 - u.size * 0.02)} personal cash.  Fee income ${fm(u.size * 0.02)}/yr vs. ~$48k/yr living costs.`, fx_ + 36, 614, { s: 12, c: C.dim });
+  if (button('start', fx_ + 580, 648, 220, 36, 'Open Fund I ▶', { kind: 'primary', s: 15, w: 800 })) startNewGame();
+  if (hasSave() && button('cont', fx_ + 20, 648, 200, 36, 'Continue saved game', {})) loadGame();
+  if (button('back', fx_ + 232, 648, 120, 36, S.screen === 'setup' && G ? 'Back' : 'Skip', { disabled: !G })) { S.screen = 'game'; }
+}
+function startNewGame() {
+  const u = S.setup;
+  newGame({ seed: u.seed, fundName: u.name.trim() || 'Bad Haircut Ventures', home: u.home, size: u.size, reservePct: u.reserve, thesis: { smin: u.smin, smax: u.smax, sectors: u.sectors.slice(), geo: u.geo, check: u.check } });
+  G.coldSector = u.sectors[0];
+  // opening pipeline so week 1 has something to do
+  for (let i = 0; i < 4; i++) sourceDeal('inbound');
+  sourceDeal('referral');
+  S.screen = 'game'; S.tab = 'pipeline'; S.modal = null; S.selHold = 0; S.scroll = {};
+  if (!localStorage_get('termsheet.seen')) { S.help = true; localStorage_set('termsheet.seen', '1'); }
+  saveGame(true);
+}
+
+// ---------------------------------------------------------------- pipeline
+function dealSort(a, b) { return (G.startups[a.sid].round ? G.startups[a.sid].round.end : 999) - (G.startups[b.sid].round ? G.startups[b.sid].round.end : 999) || a.id - b.id; }
+function buzz(d, s) {
+  const n = s.round ? s.round.rivals.length : 0;
+  return d.marketChecked ? n : clamp(n + (((d.id * 7) % 3) - 1), 0, 4);
+}
+function openDeal(d) { S.modal = { type: 'deal' }; S.dealId = d.id; S.dealView = { tab: 'dd', hq: null }; }
+
+function drawPipeline() {
+  const cols = [[], [], [], [], []];
+  for (const d of G.deals) if (d.status === 'open') cols[d.col].push(d);
+  cols.forEach(c => c.sort(dealSort));
+  // sourcing bar
+  panel(14, 90, W - 28, 44, null);
+  T('SOURCING', 30, 112, { s: 11, w: 800, c: C.gold });
+  const inb = (2.1 + G.rep / 30).toFixed(1), ref = fp(clamp(0.12 + G.net / 160 + (G.founderRel - 50) / 400, 0.05, 0.7), 0);
+  T(`Inbound ~${inb}/wk (noisy)`, 110, 112, { s: 12, c: C.dim }); tip(110, 96, 150, 32, 'Inbound: high volume, low quality. Mostly noise.');
+  T(`Referrals ${ref}/wk (network ${Math.round(G.net)})`, 290, 112, { s: 12, c: C.dim }); tip(290, 96, 190, 32, 'Referrals: low volume, high quality. Driven by your network and founder relationships.');
+  T(`Scouts ${G.staff.scouts.length}`, 500, 112, { s: 12, c: C.dim }); tip(500, 96, 70, 32, 'Scouts source steadily in their sector. Hire them in the Office tab.');
+  T(`Drift ${fp(driftLevel(), 0)}`, 580, 112, { s: 12, c: driftLevel() > 0.3 ? C.red : C.dim });
+  tip(580, 96, 80, 32, 'Share of your last 8 investments that were off-thesis. High drift costs LP trust and weakens your sourcing advantage.');
+  const sec = SECTOR_BY_ID[G.coldSector];
+  if (button('coldsec', 780, 98, 140, 28, sec.name, { s: 12, tip: 'Click to cycle the cold-outreach sector.' })) { const i = SECTORS.findIndex(z => z.id === G.coldSector); G.coldSector = SECTORS[(i + 1) % SECTORS.length].id; }
+  sectorDot(792, 112, G.coldSector, 4);
+  if (button('cold', 928, 98, 308, 28, `Cold outreach · ${COST.cold} AP`, { disabled: G.ap < COST.cold, why: 'Not enough AP.', tip: 'Low hit rate, low quality — but you choose the sector and your thesis stages.' })) act(coldOutreach(G.coldSector));
+  // columns
+  const gap = 8, cw = (W - 28 - gap * 5) / 6, y0 = 142, hgt = 528;
+  for (let c = 0; c < 6; c++) {
+    const x = 14 + c * (cw + gap);
+    panel(x, y0, cw, hgt, null, { fill: C.bg2 });
+    const names = [...COL_NAMES, 'Closed / passed'];
+    T(names[c], x + 12, y0 + 16, { s: 12.5, w: 800 });
+    if (c < 5) {
+      chip(x + cw - 34, y0 + 8, String(cols[c].length), C.dim);
+      const nxt = [COST.screen, COST.meet, COST.dd, COST.ts, 0][c];
+      T(c < 4 ? `next step: ${nxt} AP` : 'send a term sheet: 1 AP', x + 12, y0 + 34, { s: 10.5, c: C.faint });
+    } else T('last 12 weeks', x + 12, y0 + 34, { s: 10.5, c: C.faint });
+    const ly = y0 + 46, lh = hgt - 52;
+    if (c < 5) {
+      const ch = cols[c].length * 80 + 4;
+      beginScroll('col' + c, x + 4, ly, cw - 8, lh, ch);
+      cols[c].forEach((d, i) => drawCard(d, x + 6, ly + 2 + i * 80, cw - 12, c));
+      if (!cols[c].length) T(c === 0 ? 'Inbound will land here.' : 'Empty', x + cw / 2, ly + 30, { s: 11.5, c: C.faint, a: 'center' });
+      endScroll('col' + c, x + 4, ly, cw - 8, lh, ch);
+    } else {
+      const done = G.deals.filter(d => d.status !== 'open' && d.endW != null && G.week - d.endW <= 12 && (d.col >= 1 || d.status === 'closed')).sort((a, b) => b.endW - a.endW);
+      const ch = done.length * 40 + 4;
+      beginScroll('colz', x + 4, ly, cw - 8, lh, ch);
+      done.forEach((d, i) => {
+        const s = G.startups[d.sid], yy = ly + 2 + i * 40, col = d.status === 'closed' ? C.green : d.status === 'passed' ? C.faint : C.red;
+        ctx.fillStyle = col; ctx.fillRect(x + 8, yy + 4, 3, 30);
+        T(s ? s.name : '?', x + 18, yy + 10, { s: 12, w: 700, maxW: cw - 34 });
+        T(d.status === 'closed' ? 'Closed — invested' : d.why || d.status, x + 18, yy + 27, { s: 10.5, c: col === C.faint ? C.dim : col, maxW: cw - 34 });
+      });
+      endScroll('colz', x + 4, ly, cw - 8, lh, ch);
+    }
+  }
+}
+
+function drawCard(d, x, y, w, col) {
+  const s = G.startups[d.sid], rd = s.round;
+  const h = 74;
+  const hv = hit(x, y, w, h);
+  const urgent = rd && (rd.end - G.week) <= 2;
+  box(x, y, w, h, hv ? C.panel3 : C.panel, d.channel === 'hot' ? C.gold : urgent && col >= 2 ? C.red : C.line, 7);
+  if (hv) UI.cursor = 'pointer';
+  T(s.name, x + 10, y + 14, { s: 13, w: 800, maxW: w - 100 });
+  chip(x + w - measure(stageName(d.stage), 10.5, 700) - 38, y + 6, stageName(d.stage), C.dim);
+  sectorDot(x + 14, y + 33, s.sector, 4);
+  const fit = thesisFit(s);
+  T(`${SECTOR_BY_ID[s.sector].name} · ${CITY_BY_ID[s.city].short}`, x + 24, y + 33, { s: 11, c: C.dim, maxW: w - 90 });
+  ctx.fillStyle = fit.ok ? C.green : C.red; ctx.beginPath(); ctx.arc(x + w - 14, y + 33, 3.5, 0, 6.3); ctx.fill();
+  tip(x + w - 22, y + 26, 16, 14, fit.ok ? 'On-thesis' : 'Off-thesis (counts as drift if you invest): ' + [!fit.stage && 'stage', !fit.sector && 'sector', !fit.geo && 'geography'].filter(Boolean).join(', '));
+  if (col >= 1) T(`${fm(rd.ask)} ${rd.safe ? 'cap' : 'pre'} · ${fm(rd.raise)} round`, x + 10, y + 50, { s: 11.5, c: C.text, maxW: w - 20 });
+  else T(s.pitch, x + 10, y + 50, { s: 11.5, c: C.dim, maxW: w - 20 });
+  // bottom row
+  let bx = x + 10;
+  if (col >= 1) { const b = buzz(d, s); for (let i = 0; i < 4; i++) { ctx.fillStyle = i < b ? C.amber : C.panel3; ctx.fillRect(bx + i * 7, y + 61, 5, 8); } bx += 32; tip(x + 8, y + 58, 32, 14, d.marketChecked ? `${buzz(d, s)} rival(s) circling` : 'Rough read of rival interest (ask around for exact names).'); }
+  const left = rd ? Math.max(0, (col === 4 && d.tsDeadline != null ? d.tsDeadline : rd.end) - G.week) : 0;
+  T(`${left}w left`, bx, y + 65, { s: 10.5, c: left <= 2 ? C.red : C.faint, w: left <= 2 ? 700 : 400 }); bx += 46;
+  if (d.channel === 'referral') bx += chip(bx, y + 57, 'REF', C.blue, { s: 9.5 }) + 4;
+  else if (d.channel === 'hot') bx += chip(bx, y + 57, 'HOT', C.gold, { s: 9.5 }) + 4;
+  else if (d.channel === 'resurface') bx += chip(bx, y + 57, 'AGAIN', C.purple, { s: 9.5 }) + 4;
+  else if (d.channel === 'scout') bx += chip(bx, y + 57, 'SCOUT', C.teal, { s: 9.5 }) + 4;
+  // action buttons
+  const can = canAdvance(d);
+  let clickedBtn = false;
+  if (col < 4) {
+    const bw = 40, bxn = x + w - bw - 6;
+    if (button('adv' + d.id, bxn, y + 54, bw, 17, '▶' + advanceCost(d), { kind: can.ok ? 'primary' : 'ghost', disabled: !can.ok, why: can.msg, s: 10.5, w: 800, r: 4, tip: `Advance to ${COL_NAMES[col + 1]} (${advanceCost(d)} AP)` })) { act(advanceDeal(d)); clickedBtn = true; }
+  }
+  if (button('pass' + d.id, x + w - 24, y + 4, 18, 14, '✕', { s: 9, r: 3, tip: 'Pass', kind: 'ghost' })) { passDeal(d); clickedBtn = true; }
+  if (!clickedBtn && hv && UI.released && !UI.active) { openDeal(d); }
+}
+
+// ---------------------------------------------------------------- deal modal
+function dim() { ctx.fillStyle = 'rgba(4,8,13,0.74)'; ctx.fillRect(0, 51, W, H - 51); }
+
+function knowBar(x, y, w, stat, s) {
+  const k = s.know[stat];
+  T(STAT_SHORT[stat], x, y + 8, { s: 12, w: 700, c: C.text });
+  const bx = x + 70, bw = w - 70 - 62;
+  box(bx, y + 3, bw, 10, C.bg, C.line, 5);
+  if (!k) { T('unknown', bx + bw / 2, y + 8.5, { s: 10, c: C.faint, a: 'center' }); T('?', x + w, y + 8, { s: 12, c: C.faint, a: 'right' }); return; }
+  const sd = Math.sqrt(k.v), lo = clamp(k.m - 1.3 * sd, 0, 100), hi = clamp(k.m + 1.3 * sd, 0, 100), col = ratingCol(k.m);
+  ctx.globalAlpha = 0.28; ctx.fillStyle = col; ctx.fillRect(bx + bw * lo / 100, y + 4, Math.max(2, bw * (hi - lo) / 100), 8); ctx.globalAlpha = 1;
+  ctx.fillStyle = col; ctx.fillRect(bx + bw * k.m / 100 - 1.5, y + 1, 3, 14);
+  T(ratingWord(k.m), x + w, y + 8, { s: 11.5, w: 700, c: col, a: 'right' });
+  tip(x, y, w, 16, `${STAT_NAMES[stat]}: best guess ${Math.round(k.m)}/100, confidence band ±${Math.round(1.3 * sd)}. Narrow bands mean more evidence.`);
+}
+
+function drawDealModal() {
+  const d = G.deals.find(z => z.id === S.dealId);
+  if (!d) { S.modal = null; return; }
+  const s = G.startups[d.sid], rd = s ? s.round : null;
+  dim();
+  const mx_ = 30, my_ = 58, mw = 1220, mh = 612;
+  box(mx_, my_, mw, mh, C.bg2, C.line, 12);
+  // header
+  T(s.name, mx_ + 22, my_ + 26, { s: 24, w: 900 });
+  let hx = mx_ + 34 + measure(s.name, 24, 900);
+  hx += chip(hx, my_ + 17, stageName(d.stage) + (rd && rd.safe ? ' · SAFE' : ''), C.gold) + 6;
+  sectorDot(hx + 6, my_ + 26, s.sector, 5); hx += 16;
+  T(`${SECTOR_BY_ID[s.sector].name} · ${CITY_BY_ID[s.city].name} (${travelInfo(s.city).label.toLowerCase()})`, hx, my_ + 26, { s: 12.5, c: C.dim });
+  T(`${s.pitch} — founder ${s.founder.name}`, mx_ + 24, my_ + 52, { s: 12.5, c: C.dim, maxW: 900 });
+  if (button('dclose', mx_ + mw - 48, my_ + 12, 34, 30, '✕', { w: 800 })) closeModal();
+  const open = d.status === 'open';
+  if (!open) {
+    panel(mx_ + 330, my_ + 230, 560, 150, null);
+    T(d.status === 'closed' ? 'Deal closed — you are in.' : d.status === 'passed' ? 'You passed.' : 'Deal gone.', mx_ + 610, my_ + 270, { s: 20, w: 800, a: 'center', c: d.status === 'closed' ? C.green : C.red });
+    T(d.why || '', mx_ + 610, my_ + 305, { s: 13, c: C.dim, a: 'center', maxW: 520 });
+    if (button('dok', mx_ + 530, my_ + 335, 160, 34, 'Back to pipeline', { kind: 'primary' })) closeModal();
+    return;
+  }
+  const ly = my_ + 70;
+  // ---- left: round + knowledge
+  panel(mx_ + 14, ly, 350, 126, 'THE ROUND');
+  const left = Math.max(0, (d.col === 4 && d.tsDeadline != null ? d.tsDeadline : rd.end) - G.week);
+  if (d.col >= 1) {
+    T(`${fm(rd.raise)} ${rd.safe ? 'SAFE round' : 'priced round'}`, mx_ + 28, ly + 40, { s: 14, w: 800 });
+    T(`Ask: ${fm(rd.ask)} ${rd.safe ? 'valuation cap' : 'pre-money'}`, mx_ + 28, ly + 62, { s: 12.5 });
+    T(`Window: ${left} week${left === 1 ? '' : 's'} left`, mx_ + 28, ly + 82, { s: 12.5, c: left <= 2 ? C.red : C.dim });
+    const b = buzz(d, s); T(`Rival interest: ${['none', 'light', 'some', 'heavy', 'frenzy'][b]}`, mx_ + 28, ly + 102, { s: 12.5, c: b >= 3 ? C.amber : C.dim });
+  } else T('Screen the deal to see the terms they are asking for.', mx_ + 28, ly + 50, { s: 12.5, c: C.dim, maxW: 310 });
+  const fit = thesisFit(s);
+  chip(mx_ + 290, ly + 6, fit.ok ? 'ON-THESIS' : 'OFF-THESIS', fit.ok ? C.green : C.red, { s: 9.5 });
+  const ky = ly + 136;
+  panel(mx_ + 14, ky, 350, 222, 'WHAT YOU KNOW  (noisy estimates)');
+  STATS.forEach((st, i) => knowBar(mx_ + 28, ky + 30 + i * 26, 322, st, s));
+  const bgTxt = d.bg === 'flags' ? 'FLAGS FOUND' : d.bg === 'clean' ? 'clean' : 'not run';
+  T('Background', mx_ + 28, ky + 30 + 6 * 26 + 8, { s: 12, w: 700 }); T(bgTxt, mx_ + 350, ky + 30 + 6 * 26 + 8, { s: 11.5, w: 700, c: d.bg === 'flags' ? C.red : d.bg === 'clean' ? C.green : C.faint, a: 'right' });
+  if (G.staff.analysts) { }
+  const ry = ky + 232;
+  panel(mx_ + 14, ry, 350, mh - (ry - my_) - 14, 'REPORTED BY THE COMPANY');
+  if (d.reported) {
+    const r = d.reported;
+    const rows = [['MRR', fm(r.mrr)], ['Monthly growth', (r.g * 100).toFixed(1) + '%'], ['Net burn / mo', fm(r.burn)], ['Cash', fm(r.cash)], ['Runway', (r.runway > 60 ? '60+' : r.runway.toFixed(0)) + ' mo'], ['Headcount', String(r.hc)]];
+    rows.forEach((rw_, i) => { T(rw_[0], mx_ + 28, ry + 34 + i * 20, { s: 12, c: C.dim }); T(rw_[1], mx_ + 350, ry + 34 + i * 20, { s: 12.5, w: 700, a: 'right', mono: true }); });
+  } else T('Open the data room to see their numbers (they may be window-dressed).', mx_ + 28, ry + 40, { s: 12, c: C.faint, maxW: 310 });
+
+  // ---- middle: toolkit
+  const mx2 = mx_ + 378, mw2 = 420;
+  panel(mx2, ly, mw2, 256, 'DILIGENCE TOOLKIT');
+  const canTools = d.col >= 3;
+  if (!canTools) T('Move the deal to Diligence to unlock the toolkit.', mx2 + 14, ly + 40, { s: 12, c: C.faint });
+  TOOL_ORDER.forEach((t, i) => {
+    const ti = TOOL_INFO[t], av = toolAvailable(d, t), y = ly + 32 + i * 36;
+    const done = t === 'cust' ? (d.tools.cust || 0) : d.tools[t] ? 1 : 0;
+    T(ti.name + (t === 'cust' ? ` (${d.tools.cust || 0}/3)` : ''), mx2 + 14, y + 11, { s: 13, w: 700, c: done && t !== 'cust' ? C.green : C.text });
+    T(ti.desc, mx2 + 14, y + 27, { s: 10.5, c: C.faint, maxW: 280 });
+    const cost = `${ti.ap} AP${ti.cash ? ' · ' + fm(ti.cash) : ''}`;
+    if (button('tool' + t, mx2 + mw2 - 108, y + 2, 96, 28, done && t !== 'cust' ? '✓ done' : cost, { kind: av.ok ? 'ghost' : 'ghost', disabled: !av.ok, why: av.msg, s: 11.5, tip: ti.desc })) act(useTool(d, t));
+  });
+  // HQ
+  const hy = ly + 266;
+  panel(mx2, hy, mw2, 120, 'HQ VISIT  — ' + travelInfo(s.city).label);
+  const ti = travelInfo(s.city);
+  T(`${ti.ap} AP per visit${ti.debt ? ` · +${ti.debt} AP lost next week (return flight)` : ''}${ti.rel === 'local' && G.car ? ' · car saves 1 AP' : ''}`, mx2 + 14, hy + 34, { s: 11.5, c: C.dim });
+  Object.keys(HQ_FOCUS).forEach((f, i) => {
+    const av = hqAvailable(d, f), bx = mx2 + 14 + (i % 2) * 200, by = hy + 46 + Math.floor(i / 2) * 36;
+    if (button('hq' + f, bx, by, 192, 32, d.hq[f] ? '✓ ' + HQ_FOCUS[f].name : HQ_FOCUS[f].name, { disabled: !av.ok, why: av.msg, s: 11.5, tip: HQ_FOCUS[f].desc + ' Reveals ' + STAT_NAMES[HQ_FOCUS[f].stat] + ' with little noise.' })) { const r = act(hqVisit(d, f)); if (r && r.ok) S.dealView.hq = { focus: f, t0: UI.t }; }
+  });
+  if (Object.keys(d.hq).length) { if (button('hqview', mx2 + mw2 - 72, hy + 6, 62, 20, 'Replay', { s: 10.5, r: 4 })) S.dealView.hq = { focus: Object.keys(d.hq).slice(-1)[0], t0: UI.t }; }
+  // log
+  const lgy = hy + 130, lgh = mh - (lgy - my_) - 14;
+  panel(mx2, lgy, mw2, lgh, 'FINDINGS');
+  const notes = d.notes.slice().reverse();
+  let ch = 6; const hs = notes.map(n => { const hh = Math.max(22, paraH(n.text, mw2 - 114, 12, 16)) + 8; ch += hh; return hh; });
+  beginScroll('dlog', mx2 + 4, lgy + 26, mw2 - 8, lgh - 30, ch);
+  let yy = lgy + 30;
+  notes.forEach((n, i) => {
+    chip(mx2 + 12, yy, fitText(n.tag, 76, 9.5, 700), n.kind === 'bad' ? C.red : n.kind === 'good' ? C.green : C.dim, { s: 9.5 });
+    P(n.text, mx2 + 100, yy - 2, mw2 - 114, { s: 12, lh: 16, c: n.kind === 'bad' ? '#ffb4b2' : C.text });
+    yy += hs[i];
+  });
+  endScroll('dlog', mx2 + 4, lgy + 26, mw2 - 8, lgh - 30, ch);
+
+  // ---- right: decision
+  const rx = mx2 + mw2 + 14, rw = mx_ + mw - rx - 14;
+  if (d.col < 4) drawNextStep(d, s, rx, ly, rw, mh - 70 - 14);
+  else drawTermBuilder(d, s, rx, ly, rw, mh - 70 - 14);
+  if (S.dealView.hq) drawHQScene(d, s);
+}
+
+function drawNextStep(d, s, x, y, w, h) {
+  panel(x, y, w, h, 'NEXT STEP');
+  const c = canAdvance(d), next = COL_NAMES[d.col + 1];
+  const blurb = [
+    'Skim the deck. Gives you a first, very noisy read on team, product and timing.',
+    'Take a founder meeting. Reveals more about the founder, their honesty and the market they are chasing.',
+    'Open diligence. Unlocks the data room, references, customer calls, the technical expert, background check and HQ visits.',
+    'Prepare a term sheet. Founders will compare you with rivals, so decide how hard to push on price and terms.',
+  ][d.col];
+  const hh = P(blurb, x + 14, y + 34, w - 28, { s: 12.5, c: C.dim });
+  if (d.col === 1 && !c.ok && c.msg && c.msg.includes('reputation')) P('Great founders only take your call at high reputation. A referral lowers the bar.', x + 14, y + 40 + hh, w - 28, { s: 12, c: C.amber });
+  if (button('dadv', x + 14, y + h - 150, w - 28, 44, `Move to ${next}`, { kind: 'primary', sub: `${advanceCost(d)} AP`, disabled: !c.ok, why: c.msg, s: 14 })) act(advanceDeal(d));
+  if (button('dmkt', x + 14, y + h - 98, w - 28, 34, d.marketChecked ? 'Asked around ✓' : `Ask around about rivals · ${COST.market} AP`, { disabled: d.marketChecked || d.col < 1 || G.ap < 1, why: d.col < 1 ? 'Screen the deal first.' : d.marketChecked ? '' : 'Not enough AP.', s: 12 })) act(marketCheck(d));
+  if (button('dpass', x + 14, y + h - 56, w - 28, 34, 'Pass on this deal', { kind: 'danger', s: 12.5 })) { passDeal(d); }
+  if (d.col === 3) {
+    const cov = diligenceCoverage(d);
+    T(`Diligence coverage ${Math.round(cov * 100)}%`, x + 14, y + h - 168, { s: 11.5, c: cov < 0.5 ? C.amber : C.dim });
+    tip(x + 14, y + h - 178, w - 28, 20, 'If this turns out to be a fraud, you lose in proportion to what you skipped.');
+  }
+}
+
+// ---- term sheet builder
+function drawTermBuilder(d, s, x, y, w, h) {
+  const rd = s.round, t = d.ts || (d.ts = defaultTerms(d));
+  panel(x, y, w, h, 'TERM SHEET');
+  const lim = checkLimits(d, t);
+  t.check = clamp(Math.round(t.check / 5000) * 5000, lim.lo, lim.hi);
+  let ry = y + 34;
+  const lx = x + 14, cw = w - 28;
+  // role
+  if (!rd.safe) {
+    if (button('tlead', lx, ry, cw / 2 - 3, 28, 'Lead', { kind: t.lead ? 'primary' : 'ghost', s: 12.5, tip: 'Set the price and terms, take a board seat. Needs ≥25% of the round.' })) { t.lead = true; t.board = true; t.prorata = true; }
+    if (button('tfol', lx + cw / 2 + 3, ry, cw / 2 - 3, 28, 'Follow', { kind: !t.lead ? 'primary' : 'ghost', s: 12.5, tip: 'Take a smaller slice at someone else\'s price and standard terms (1x non-participating, broad-based anti-dilution).' })) { t.lead = false; t.board = false; t.prorata = false; t.pref = '1x'; t.anti = 'wa'; t.pool = 0.10; }
+    ry += 36;
+  } else { T('SAFE — converts at the next priced round', lx, ry + 10, { s: 12, c: C.dim }); ry += 26; }
+  const pv0 = termsPreview(d, t);
+  // valuation
+  if (rd.safe || t.lead) {
+    T(rd.safe ? `Cap ${fm(rd.ask * t.valPct)}` : `Pre-money ${fm(rd.ask * t.valPct)}`, lx, ry + 8, { s: 12.5, w: 700 });
+    T(`${Math.round(t.valPct * 100)}% of ask`, lx + cw, ry + 8, { s: 11.5, c: t.valPct > 1.02 ? C.green : t.valPct < 0.9 ? C.amber : C.dim, a: 'right' });
+    t.valPct = slider('tval', lx, ry + 18, cw, t.valPct, 0.6, 1.25, 0.01);
+    ry += 40;
+  } else { T(`Price set by the lead: ${fm(followPre(d))} pre`, lx, ry + 8, { s: 12.5, w: 700 }); ry += 28; }
+  // check
+  T(`Check ${fm(t.check)}`, lx, ry + 8, { s: 12.5, w: 700 }); T(`range ${fm(lim.lo)}–${fm(lim.hi)}`, lx + cw, ry + 8, { s: 11, c: C.faint, a: 'right' });
+  t.check = slider('tchk', lx, ry + 18, cw, t.check, lim.lo, lim.hi, 5000);
+  ry += 40;
+  // terms
+  if (t.safe) {
+    t.mfn = toggle('tmfn', lx, ry, 'MFN clause', t.mfn, { tip: 'If a later SAFE gets a lower cap, yours matches it.' });
+    t.disc = toggle('tdisc', lx + 140, ry, '20% discount', !!t.disc, { tip: 'Converts at the lower of the cap and a 20% discount to the round price.' }) ? 0.2 : 0;
+    t.prorata = toggle('tpro', lx, ry + 26, 'Pro-rata side letter', t.prorata);
+    ry += 54;
+  } else if (t.lead) {
+    t.board = toggle('tboard', lx, ry, 'Board seat', t.board, { tip: 'Votes on exits and founder replacement, less spin in reports. Costs ~1 AP per quarter.' });
+    t.prorata = toggle('tpro', lx + 150, ry, 'Pro-rata rights', t.prorata, { tip: 'Right to keep your percentage in later rounds.' });
+    ry += 28;
+    const dd = stepper('tpool', lx, ry, cw + 120 - 120, 'Option pool (post)', Math.round(t.pool * 100) + '%', t.pool > 0.08, t.pool < 0.20); if (dd) t.pool = clamp(t.pool + dd * 0.02, 0.08, 0.20);
+    ry += 30;
+    T('Liquidation preference', lx, ry + 8, { s: 11.5, c: C.dim }); ry += 18;
+    if (button('tp1', lx, ry, cw / 2 - 3, 26, '1x non-participating', { kind: t.pref === '1x' ? 'primary' : 'ghost', s: 11 })) t.pref = '1x';
+    if (button('tp2', lx + cw / 2 + 3, ry, cw / 2 - 3, 26, 'Participating', { kind: t.pref === 'part' ? 'primary' : 'ghost', s: 11, tip: 'You get your money back AND your share. Founders hate it.' })) t.pref = 'part';
+    ry += 32;
+    T('Anti-dilution', lx, ry + 8, { s: 11.5, c: C.dim }); ry += 18;
+    [['none', 'None'], ['wa', 'Broad-based'], ['ratchet', 'Full ratchet']].forEach((o, i) => { if (button('ta' + o[0], lx + i * (cw / 3), ry, cw / 3 - 3, 26, o[1], { kind: t.anti === o[0] ? 'primary' : 'ghost', s: 11, tip: o[0] === 'ratchet' ? 'Very aggressive: resets your price to any down-round price. Founders may walk.' : '' })) t.anti = o[0]; });
+    ry += 34;
+  } else {
+    T('Standard terms: 1x non-participating, broad-based anti-dilution.', lx, ry + 6, { s: 11, c: C.faint, maxW: cw }); ry += 24;
+  }
+  // preview
+  const pv = termsPreview(d, t), p = winProb(d, t);
+  box(lx, ry, cw, 52, C.bg, C.line, 6);
+  T(`You own ≈ ${fp(pv.own, 2)} at close`, lx + 10, ry + 14, { s: 12.5, w: 700 });
+  T(`${t.safe ? 'cap' : 'post'} ${fm(t.safe ? rd.ask * t.valPct : pv.post)} · cost ${fm(t.check)} + legal ${fm(t.safe ? CASHCOST.legalSafe : CASHCOST.legalPriced)}`, lx + 10, ry + 33, { s: 11, c: C.dim, maxW: cw - 20 });
+  ry += 60;
+  // founder meter
+  const fz = (((d.id * 37) % 11) - 5) * 0.02, pf = d.marketChecked ? p : clamp(p + fz, 0, 1);
+  T('Founder mood', lx, ry + 8, { s: 12, c: C.dim }); T(founderMood(pf) + (d.marketChecked ? ` · ${Math.round(p * 100)}%` : ''), lx + cw, ry + 8, { s: 12.5, w: 800, c: pf > 0.55 ? C.green : pf > 0.3 ? C.gold : C.red, a: 'right' });
+  bar(lx, ry + 20, cw, 8, pf, pf > 0.55 ? C.green : pf > 0.3 ? C.gold : C.red);
+  tip(lx, ry, cw, 30, 'Founders weigh price, terms, your brand, your speed and your value-add against rival offers. Ask around to see the exact odds.');
+  ry += 36;
+  if (rd.rivals.length && d.marketChecked) {
+    rd.rivals.forEach(r => { T(`${r.name}: ~${fm(r.pre)} pre`, lx, ry + 7, { s: 11, c: C.amber, maxW: cw }); ry += 15; });
+  } else if (rd.rivals.length) { T(`${buzz(d, s) ? 'Others are circling.' : 'Looks quiet.'} Ask around for names.`, lx, ry + 7, { s: 11, c: C.faint }); ry += 15; }
+  const sendY = y + h - 92;
+  const budgetOk = t.check <= lim.funds + 1;
+  T(`Initial-check budget ${fm(lim.funds)}`, lx, sendY - 8, { s: 11, c: budgetOk ? C.faint : C.red });
+  if (button('tsend', lx, sendY + 4, cw, 42, 'Send term sheet', { kind: 'primary', sub: `${COST.send} AP · window ${Math.max(0, (d.tsDeadline != null ? d.tsDeadline : rd.end) - G.week)}w`, disabled: G.ap < COST.send || !budgetOk, why: !budgetOk ? 'Over your initial-check budget (reserves are held back).' : 'Not enough AP.', s: 14 })) {
+    const r = sendTermSheet(d, t);
+    if (r.ok === false) act(r);
+    else if (r.won) { stampFx('SIGNED', C.green); sfx('good'); flash(r.msg, 'good'); }
+    else { stampFx('LOST', C.red); sfx('bad'); flash(r.msg, 'bad'); }
+  }
+  if (button('tpass', lx, sendY + 52, cw / 2 - 3, 28, 'Pass', { kind: 'danger', s: 12 })) passDeal(d);
+  if (button('tmkt', lx + cw / 2 + 3, sendY + 52, cw / 2 - 3, 28, d.marketChecked ? 'Asked ✓' : 'Ask around · 1 AP', { disabled: d.marketChecked || G.ap < 1, s: 11.5 })) act(marketCheck(d));
+}
+
+// ---- HQ scene
+function drawHQScene(d, s) {
+  const v = S.dealView.hq; if (!v) return;
+  ctx.fillStyle = 'rgba(2,5,9,0.8)'; ctx.fillRect(0, 51, W, H - 51);
+  const x0 = 170, y0 = 90, w0 = 940, h0 = 540;
+  box(x0, y0, w0, h0, C.bg2, C.gold, 12);
+  T(`${s.name} — HQ, ${CITY_BY_ID[s.city].name}`, x0 + 22, y0 + 24, { s: 18, w: 800 });
+  T(HQ_FOCUS[v.focus].name, x0 + w0 - 70, y0 + 24, { s: 12.5, c: C.gold, a: 'right', w: 700 });
+  if (button('hqx', x0 + w0 - 56, y0 + 10, 40, 28, '✕', {})) { S.dealView.hq = null; return; }
+  // scene area
+  const sx = x0 + 20, sy = y0 + 46, sw = w0 - 40, sh = 380;
+  const r = mkrng(hashStr('hq' + s.id));
+  ctx.save(); ctx.beginPath(); ctx.rect(sx, sy, sw, sh); ctx.clip();
+  ctx.fillStyle = '#1b2733'; ctx.fillRect(sx, sy, sw, sh);
+  ctx.fillStyle = '#243548'; ctx.fillRect(sx, sy + 150, sw, sh - 150);
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)'; for (let i = 0; i < 20; i++) { ctx.beginPath(); ctx.moveTo(sx + i * 50, sy + 150); ctx.lineTo(sx + i * 50 - 60, sy + sh); ctx.stroke(); }
+  // windows
+  for (let i = 0; i < 3; i++) { ctx.fillStyle = '#3b5f86'; ctx.fillRect(sx + 20 + i * 80, sy + 24, 62, 78); ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fillRect(sx + 20 + i * 80, sy + 24, 62, 30); }
+  // whiteboard
+  const wbx = sx + 290, wby = sy + 20, wbw = 330, wbh = 112;
+  ctx.fillStyle = '#e9eef2'; ctx.fillRect(wbx, wby, wbw, wbh); ctx.strokeStyle = '#8c9aa6'; ctx.lineWidth = 3; ctx.strokeRect(wbx, wby, wbw, wbh);
+  const run = runwayMo(s), hc = headcount(s);
+  ctx.font = fontStr(15, 800, true); ctx.fillStyle = '#c0392b'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(`RUNWAY: ${run > 40 ? '40+' : run.toFixed(0)} MO`, wbx + 16, wby + 26);
+  ctx.fillStyle = '#2c3e50'; ctx.font = fontStr(12, 600, true);
+  ctx.fillText(`burn ${fm(Math.max(0, netBurn(s)))}/mo`, wbx + 16, wby + 50);
+  ctx.fillText(s.h.B > 55 ? 'plan: hire 2, ship v2' : s.h.B > 35 ? 'plan: hire 6?? (see Q3)' : 'plan: ??? → profit?', wbx + 16, wby + 72);
+  ctx.strokeStyle = '#2c7a4b'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(wbx + 200, wby + 90); for (let i = 0; i < 6; i++) ctx.lineTo(wbx + 200 + i * 22, wby + 90 - (s.h.P > 50 ? i * 8 : i % 2 * 12)); ctx.stroke();
+  // desks
+  const desks = clamp(Math.ceil(hc * 1.35) + 2, 6, 18), per = Math.ceil(desks / 3);
+  const occupied = Math.min(desks, hc), order = []; for (let i = 0; i < desks; i++) order.push(i);
+  for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(rf(r) * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+  const occ = new Set(order.slice(0, occupied));
+  for (let i = 0; i < desks; i++) {
+    const row = Math.floor(i / per), colI = i % per;
+    const dx = sx + 40 + colI * Math.min(110, (sw - 260) / per), dy = sy + 190 + row * 62;
+    ctx.fillStyle = '#5a4630'; ctx.fillRect(dx, dy + 18, 70, 12);
+    ctx.fillStyle = '#10161c'; ctx.fillRect(dx + 20, dy, 30, 20);
+    ctx.fillStyle = occ.has(i) ? '#6fb7ff' : '#26323d'; ctx.fillRect(dx + 22, dy + 2, 26, 14);
+    if (occ.has(i)) {
+      const slump = s.h.F < 42 ? 4 : 0;
+      ctx.fillStyle = ['#d98c5f', '#c9a07a', '#8d5a3b', '#f0c9a0'][ri(r, 0, 3)]; ctx.beginPath(); ctx.arc(dx + 35, dy + 30 + slump, 7, 0, 6.3); ctx.fill();
+      ctx.fillStyle = s.h.F > 60 ? '#4cc38a' : s.h.F > 42 ? '#7a8fb5' : '#8a6a6a'; ctx.fillRect(dx + 27, dy + 37 + slump, 16, 14);
+    } else { ctx.fillStyle = 'rgba(255,255,255,0.05)'; ctx.fillRect(dx + 8, dy + 20, 54, 4); }
+  }
+  // trash + plant clues
+  if (s.h.B < 40) { ctx.fillStyle = '#6b4f3a'; for (let i = 0; i < 5; i++) ctx.fillRect(sx + 24 + i * 7, sy + sh - 34 - (i % 2) * 6, 6, 12); }
+  ctx.fillStyle = s.h.F > 50 ? '#3f8f4f' : '#8a7a3f'; ctx.beginPath(); ctx.arc(sx + sw - 250, sy + 130, 16, 0, 6.3); ctx.fill(); ctx.fillStyle = '#6b4a2f'; ctx.fillRect(sx + sw - 258, sy + 140, 16, 14);
+  // product screen (demo)
+  const psx = sx + sw - 220, psy = sy + 40;
+  ctx.fillStyle = '#0f1419'; ctx.fillRect(psx, psy, 190, 110); ctx.strokeStyle = '#555'; ctx.strokeRect(psx, psy, 190, 110);
+  if (s.h.X > 50) { ctx.fillStyle = '#4cc38a'; for (let i = 0; i < 6; i++) ctx.fillRect(psx + 14 + i * 28, psy + 96 - (10 + (i * 37 % 60)), 18, 10 + (i * 37 % 60)); T('LIVE DEMO · OK', psx + 95, psy + 12, { s: 10, c: C.green, a: 'center', mono: true }); }
+  else { ctx.fillStyle = '#ef6461'; T('ERROR 500', psx + 95, psy + 50, { s: 14, w: 800, c: C.red, a: 'center', mono: true }); T('works on my machine', psx + 95, psy + 74, { s: 10.5, c: C.dim, a: 'center', mono: true }); }
+  // founder
+  const fxp = sx + sw - 90, fyp = sy + 250;
+  ctx.fillStyle = '#e0b48c'; ctx.beginPath(); ctx.arc(fxp, fyp, 15, 0, 6.3); ctx.fill();
+  ctx.fillStyle = '#22262b'; ctx.fillRect(fxp - 15, fyp - 17, 30, 9); // hair
+  ctx.fillStyle = s.fraud ? '#6b4a8a' : '#3b6ea5'; ctx.fillRect(fxp - 17, fyp + 15, 34, 46);
+  const honest = s.h.I > 48;
+  const said = honest ? 'Honest answer: churn is 4%.\nWe are fixing onboarding.' : 'Great question! Actually,\ncan we circle back to that?';
+  const bw = 214, bx = fxp - bw - 20, by = fyp - 44;
+  ctx.fillStyle = '#f2f5f8'; rrect(bx, by, bw, 50, 8); ctx.fill();
+  said.split('\n').forEach((l, i) => T(l, bx + 10, by + 15 + i * 18, { s: 12, c: '#1b2733', w: 600 }));
+  ctx.restore();
+  // clue summary
+  T(`Real headcount: ${hc}${d.reported ? `  (they told you ${d.reported.hc})` : ''}`, x0 + 22, y0 + 446, { s: 13, w: 700 });
+  const last = d.notes.filter(n => n.tag === 'HQ visit').slice(-1)[0];
+  if (last) P(last.text, x0 + 22, y0 + 462, w0 - 44, { s: 13, c: C.dim });
+  T('Hover the scene for clues: the whiteboard, the empty desks, the demo screen and the founder all tell you something.', x0 + 22, y0 + 524, { s: 11, c: C.faint });
+  tip(wbx, wby, wbw, wbh, `Whiteboard: runway countdown and burn plan. ${s.h.B < 40 ? 'The plan is… optimistic.' : ''}`);
+  tip(sx, sy + 190, sw - 260, 190, `${occupied} of ${desks} desks occupied.${d.reported ? ' They claimed ' + d.reported.hc + ' people.' : ''}`);
+  tip(psx, psy, 190, 110, 'The product demo screen.');
+  tip(fxp - 110, fyp - 50, 140, 120, `${s.founder.name}. ${s.founder.quirk}.`);
+}
+
+function closeModal() { S.modal = null; S.dealView = {}; }
+
+// ============================================================================
+// SCREENS B: portfolio, fund, office, market, modals (event, menu, help, end)
+// ============================================================================
+
+const CAP_COLS = ['#5cb4ff', '#b79cff', '#4fd1b5', '#ffb45c', '#ef7a8b', '#e6d86a', '#7fd35f', '#9aa9b8'];
+function statusLabel(s, h) {
+  if (h.status === 'written-off') return ['Written off', C.red];
+  if (h.status === 'exited') return ['Exited', C.green];
+  if (s.status === 'public') return [G.week < h.lockUntil ? `Public · lock ${h.lockUntil - G.week}w` : 'Public', C.blue];
+  if (s.round) return ['Raising', C.gold];
+  const run = runwayMo(s);
+  if (run < 4) return ['Low runway', C.red];
+  return ['Private', C.dim];
+}
+function trLabel(t) {
+  if (t.kind === 'safe') return `SAFE ${fm(t.invested)} · cap ${fm(t.cap)}${t.mfn ? ' · MFN' : ''}${t.disc ? ' · 20% disc' : ''}${t.shares ? ' (converted)' : ''}`;
+  if (t.kind === 'note') return `Bridge note ${fm(t.invested)} · 20% discount${t.shares ? ' (converted)' : ''}`;
+  return `${fm(t.invested)} @ ${t.pps ? '$' + t.pps.toFixed(3) : '—'}/sh · ${t.pref === 'part' ? 'participating' : '1x non-part'} · ${t.anti === 'wa' ? 'WA anti-dil' : t.anti === 'ratchet' ? 'full ratchet' : 'no anti-dil'}`;
+}
+
+// ---------------------------------------------------------------- portfolio
+function drawPortfolio() {
+  const rows = portfolioRows();
+  const act_ = rows.filter(r => r.active);
+  const cost = sum(act_, r => r.h.invested), mark = sum(act_, r => r.mark), real = sum(rows, r => r.h.realized), allInv = sum(rows, r => r.h.invested + (r.h.realizedCost || 0));
+  panel(14, 90, 780, 44, null);
+  [['ACTIVE', String(act_.length)], ['COST', fm(cost)], ['MARK', fm(mark)], ['REALIZED', fm(real)], ['GROSS MOIC', fx((mark + real) / Math.max(1, allInv))]].forEach((c, i) => {
+    T(c[0], 30 + i * 150, 104, { s: 10, w: 800, c: C.faint }); T(c[1], 30 + i * 150, 122, { s: 14, w: 700, mono: true });
+  });
+  // table
+  panel(14, 142, 780, 526, null);
+  const cols = [['Company', 34, 'left'], ['Stage', 204, 'left'], ['Cost', 318, 'right'], ['Own', 378, 'right'], ['Mark', 458, 'right'], ['MOIC', 524, 'right'], ['Runway', 598, 'right'], ['Status', 616, 'left']];
+  cols.forEach(c => T(c[0], c[1], 160, { s: 10.5, w: 800, c: C.faint, a: c[2] }));
+  const ch = rows.length * 30 + 4;
+  beginScroll('port', 20, 172, 768, 490, ch);
+  rows.forEach((r, i) => {
+    const y = 174 + i * 30, sel = S.selHold === r.h.sid;
+    const hv = hit(20, y, 760, 28);
+    if (sel || hv) box(20, y, 760, 28, sel ? C.panel3 : C.panel2, sel ? C.gold : null, 5);
+    if (hv) { UI.cursor = 'pointer'; if (UI.released && !UI.active) S.selHold = r.h.sid; }
+    const s = r.s, st = statusLabel(s, r.h), dim_ = !r.active;
+    sectorDot(34, y + 14, s.sector, 4);
+    T(s.name, 44, y + 14, { s: 12.5, w: 700, maxW: 140, c: dim_ ? C.dim : C.text });
+    T(stageName(s.done), 204, y + 14, { s: 11.5, c: C.dim });
+    T(fm(r.h.invested), 318, y + 14, { s: 12, mono: true, a: 'right' });
+    T(r.active ? fp(r.own, 2) : '—', 378, y + 14, { s: 12, mono: true, a: 'right' });
+    T(r.active ? fm(r.mark) : fm(r.h.realized), 458, y + 14, { s: 12, mono: true, a: 'right', c: r.active ? C.text : C.dim });
+    T(fx(r.moic, 1), 524, y + 14, { s: 12, mono: true, a: 'right', c: r.moic >= 1 ? C.green : r.moic > 0.3 ? C.amber : C.red });
+    T(r.active && s.status === 'private' ? (runwayMo(s) > 40 ? '40+' : runwayMo(s).toFixed(0)) + ' mo' : '—', 598, y + 14, { s: 11.5, mono: true, a: 'right', c: r.active && runwayMo(s) < 5 ? C.red : C.dim });
+    T(st[0], 616, y + 14, { s: 11.5, w: 700, c: st[1], maxW: 160 });
+  });
+  if (!rows.length) T('No investments yet. Close a deal from the Pipeline tab.', 404, 260, { s: 13, c: C.faint, a: 'center' });
+  endScroll('port', 20, 172, 768, 490, ch);
+  // detail
+  const sel = rows.find(r => r.h.sid === S.selHold) || rows[0];
+  if (sel) { S.selHold = sel.h.sid; drawHoldingDetail(sel, 806, 90, 460, 578); }
+  else panel(806, 90, 460, 578, 'DETAIL');
+}
+
+function capRows(s) {
+  const f = fd(s), rows = [{ n: 'Founders', v: s.cap.founders }, { n: 'Option pool', v: s.cap.pool }];
+  for (const i of s.cap.inv) rows.push({ n: i.name, v: i.shares });
+  const h = G.hold[s.id];
+  if (h) { const mine = sum(h.tr, t => t.shares || 0); if (mine > 0) rows.push({ n: 'You', v: mine, me: true }); }
+  const merged = []; // merge repeated investor names
+  for (const r of rows) { const m = merged.find(x => x.n === r.n && !x.me); if (m && !r.me) m.v += r.v; else merged.push(Object.assign({}, r)); }
+  return { rows: merged, f };
+}
+
+function drawHoldingDetail(r, x, y, w, h_) {
+  const s = r.s, h = r.h;
+  panel(x, y, w, h_, null);
+  T(s.name, x + 16, y + 22, { s: 19, w: 900 });
+  chip(x + 24 + measure(s.name, 19, 900), y + 14, stageName(s.done), C.gold);
+  T(`${SECTOR_BY_ID[s.sector].name} · ${CITY_BY_ID[s.city].name} · ${s.founder.name}`, x + 16, y + 44, { s: 11.5, c: C.dim, maxW: w - 30 });
+  const st = statusLabel(s, h);
+  chip(x + w - measure(st[0], 10.5, 700) - 30, y + 14, st[0], st[1]);
+  let yy = y + 64;
+  // report
+  if (r.active && s.status === 'private') {
+    box(x + 12, yy, w - 24, 62, C.bg, C.line, 6);
+    if (s.report) {
+      const q = s.report;
+      T(`Quarterly update · week ${q.w + 1}${h.board ? ' · board-verified' : ''}`, x + 22, yy + 12, { s: 10.5, w: 700, c: C.faint });
+      const items = [['MRR', fm(q.mrr)], ['Burn/mo', fm(Math.max(0, q.burn))], ['Runway', (q.runway > 40 ? '40+' : q.runway.toFixed(0)) + ' mo'], ['Team', String(Math.round(q.hc))]];
+      items.forEach((it, i) => { T(it[0], x + 22 + i * 105, yy + 32, { s: 10, c: C.faint }); T(it[1], x + 22 + i * 105, yy + 49, { s: 13.5, w: 700, mono: true }); });
+      tip(x + 12, yy, w - 24, 62, 'Reported by the company. Reports can be spun — a board seat reduces the spin, and the data room (via a fresh look) shows more.');
+    } else T('No quarterly update yet — the first arrives at quarter-end.', x + 22, yy + 31, { s: 12, c: C.faint });
+    yy += 72;
+  } else if (s.status === 'public') {
+    box(x + 12, yy, w - 24, 62, C.bg, C.line, 6);
+    T(`Public · market cap ${fm(s.mcap)}`, x + 22, yy + 16, { s: 13.5, w: 700 });
+    T(`Your stake ${fp(r.own, 2)} = ${fm(publicValue(h))}`, x + 22, yy + 38, { s: 12.5, c: C.dim });
+    T(G.week < h.lockUntil ? `Locked for ${h.lockUntil - G.week} more weeks` : 'Unlocked — you can sell', x + w - 22, yy + 38, { s: 12, w: 700, a: 'right', c: G.week < h.lockUntil ? C.amber : C.green });
+    yy += 72;
+  }
+  // position
+  const lines = [['Cost', fm(h.invested)], ['Ownership', fp(r.own, 2)], ['Mark', fm(r.mark)], ['Realized', fm(h.realized)], ['MOIC', fx(r.moic, 2)]];
+  lines.forEach((l, i) => { T(l[0], x + 16 + (i % 3) * 148, yy + 8 + Math.floor(i / 3) * 34, { s: 10.5, c: C.faint, w: 700 }); T(l[1], x + 16 + (i % 3) * 148, yy + 24 + Math.floor(i / 3) * 34, { s: 14, w: 700, mono: true }); });
+  T('Founder rel.', x + 16 + 2 * 148 - 0, yy + 42, { s: 10.5, c: C.faint, w: 700 });
+  bar(x + 16 + 2 * 148, yy + 54, 120, 8, h.rel / 100, h.rel > 55 ? C.green : h.rel > 35 ? C.gold : C.red);
+  tip(x + 16 + 2 * 148, yy + 36, 130, 30, `Founder relationship ${Math.round(h.rel)}/100. Aggressive terms and enforcing anti-dilution lower it; it affects follow-on allocations and referrals.`);
+  yy += 76;
+  chip(x + 16, yy, h.board ? 'BOARD SEAT' : 'no board seat', h.board ? C.green : C.faint, { s: 9.5 });
+  chip(x + 110, yy, h.prorata ? 'PRO-RATA RIGHTS' : 'no pro-rata rights', h.prorata ? C.green : C.faint, { s: 9.5 });
+  if (s.round && !s.round.taken) chip(x + 240, yy, `Raising ${stageName(s.round.stage)}`, C.gold, { s: 9.5 });
+  yy += 26;
+  // cap table
+  T('CAP TABLE', x + 16, yy + 6, { s: 10.5, w: 800, c: C.faint });
+  const cap = capRows(s);
+  let bx = x + 16; const bw = w - 32;
+  cap.rows.forEach((cr, i) => { const wdt = bw * cr.v / cap.f; ctx.fillStyle = cr.me ? C.gold : CAP_COLS[i % CAP_COLS.length]; ctx.fillRect(bx, yy + 16, Math.max(1, wdt - 1), 12); bx += wdt; });
+  tip(x + 16, yy + 14, bw, 16, 'Fully-diluted ownership. Down rounds, option-pool top-ups and new rounds dilute you unless you follow on.');
+  const show = cap.rows.slice().sort((a, b) => b.v - a.v).slice(0, 5);
+  show.forEach((cr, i) => { const col = i % 2, rowI = Math.floor(i / 2); const idx = cap.rows.indexOf(cr); ctx.fillStyle = cr.me ? C.gold : CAP_COLS[idx % CAP_COLS.length]; ctx.fillRect(x + 16 + col * 220, yy + 38 + rowI * 16, 8, 8); T(`${cr.n} ${fp(cr.v / cap.f, 1)}`, x + 30 + col * 220, yy + 42 + rowI * 16, { s: 11, c: cr.me ? C.gold : C.dim, maxW: 190 }); });
+  yy += 38 + 3 * 16 + 4;
+  // tranches
+  h.tr.slice(-3).forEach((t, i) => { T(trLabel(t), x + 16, yy + 6 + i * 15, { s: 10.5, c: C.faint, maxW: w - 30 }); });
+  yy += Math.min(3, h.tr.length) * 15 + 8;
+  // actions
+  if (r.active && s.status === 'private') {
+    T('HELP  (spend AP, nudge hidden stats upward)', x + 16, yy + 6, { s: 10.5, w: 800, c: C.faint });
+    Object.keys(HELP_INFO).forEach((k, i) => {
+      const av = helpAvailable(h, k), hi = HELP_INFO[k], bx_ = x + 16 + (i % 3) * 144, by = yy + 18 + Math.floor(i / 3) * 34;
+      const cd = (h.helpCd[k] || 0) - G.week;
+      if (button('help' + k + h.sid, bx_, by, 138, 30, hi.name, { sub: cd > 0 ? `cooldown ${cd}w` : `${hi.ap} AP`, disabled: !av.ok, why: av.msg, s: 11, tip: hi.desc })) act(helpAction(h, k));
+    });
+    yy += 18 + 68;
+    const so = secondaryOffer(h);
+    if (so) {
+      T(`Secondary: sell at ${Math.round(so.disc * 100)}% below mark`, x + 16, yy + 8, { s: 11, c: C.dim });
+      [0.25, 0.5, 1].forEach((f, i) => { if (button('sec' + f + h.sid, x + w - 16 - 3 * 62 + i * 62, yy - 2, 58, 24, Math.round(f * 100) + '%', { s: 11, disabled: G.ap < 1, why: 'Needs 1 AP' })) act(sellSecondary(h, f)); });
+    }
+  } else if (r.active && s.status === 'public') {
+    const can = canSellPublic(h);
+    T('SELL SHARES (1 AP)', x + 16, yy + 6, { s: 10.5, w: 800, c: C.faint });
+    [0.25, 0.5, 1].forEach((f, i) => { if (button('pub' + f + h.sid, x + 16 + i * 100, yy + 20, 94, 30, f === 1 ? 'Sell all' : 'Sell ' + Math.round(f * 100) + '%', { disabled: !can || G.ap < 1, why: !can ? `Locked for ${h.lockUntil - G.week} more weeks` : 'Needs 1 AP', kind: 'good' })) act(sellPublic(h, f)); });
+    T('Stock can fall while you wait. Selling is a decision, not a default.', x + 16, yy + 66, { s: 11, c: C.faint });
+  }
+}
+
+// ---------------------------------------------------------------- fund
+function drawFund() {
+  const m = fundMetrics();
+  panel(14, 90, 760, 300, 'J-CURVE  (net TVPI and DPI, quarterly marks)');
+  const pts = G.hist.map(h => [h.w / 52, h.tvpi]), pd = G.hist.map(h => [h.w / 52, h.dpi]);
+  lineChart(24, 120, 740, 264, [{ pts: pd, col: C.teal, lw: 2 }, { pts: pts, col: C.gold, lw: 2.5 }], { xmin: 0, xmax: 10, ymin: 0, ymax: Math.max(2, ...pts.map(p => p[1]) , ...pd.map(p => p[1])) * 1.1, hline: 1, yfmt: v => v.toFixed(1) + 'x', xfmt: v => 'Y' + Math.round(v), xticks: 5 });
+  T('TVPI', 680, 122, { s: 11, w: 800, c: C.gold }); T('DPI', 725, 122, { s: 11, w: 800, c: C.teal });
+  // metrics grid
+  panel(14, 400, 760, 268, 'FUND I — METRICS');
+  const feesLeft = annualFee() / 52 * weeksLeft();
+  const items = [
+    ['Net TVPI', fx(m.tvpi), 'Marks + distributions, after fees and accrued carry, over paid-in capital.'], ['DPI', fx(m.dpi), 'Cash actually returned to LPs over paid-in. LPs see TVPI early and DPI late.'], ['Net IRR', m.irr == null ? '—' : fp(m.irr, 1), 'Annualised net return on LP cash flows.'],
+    ['NAV (marks)', fm(m.nav), 'Your holdings at last-round marks.'], ['Paid-in', fm(G.called), 'Capital called so far (fees, expenses, investments).'], ['Distributed', fm(G.dist), 'Gross proceeds paid out.'],
+    ['Carry paid (you)', fm(G.carryPaid), 'Carry arrives late, only after exits return the fund.'], ['Carry accrued', fm(m.carryAccrued), 'What you would be owed if everything liquidated at marks.'], ['Fees paid', fm(G.feesPaid), '2% of commitments per year.'],
+    ['Dry powder', fm(dryPowder()), 'Uncalled capital minus the fees you still owe the fund over its life.'], ['Reserves left', fm(G.reserveLeft), 'Held back for follow-ons.'], ['Fees still due', fm(feesLeft), ''],
+  ];
+  items.forEach((it, i) => {
+    const x = 30 + (i % 3) * 245, y = 424 + Math.floor(i / 3) * 56;
+    T(it[0], x, y + 6, { s: 10.5, w: 700, c: C.faint }); T(it[1], x, y + 28, { s: 18, w: 800, mono: true, c: it[0] === 'Net TVPI' ? (m.tvpi >= 1 ? C.green : C.amber) : C.text });
+    tip(x, y, 230, 48, it[2]);
+  });
+  // right column
+  const rx = 786, rw = 480;
+  panel(rx, 90, rw, 218, 'THESIS & DISCIPLINE');
+  const t = G.thesis;
+  T(`${stageName(t.smin)} → ${stageName(t.smax)} · ${t.geo === 'local' ? 'home city' : t.geo === 'region' ? 'home region' : 'global'} · ~${fp(t.check, 0)} checks`, rx + 16, 130, { s: 12.5, w: 700 });
+  let sx_ = rx + 16; t.sectors.forEach(id => { sx_ += chip(sx_, 144, SECTOR_BY_ID[id].name, SECTOR_BY_ID[id].col) + 6; });
+  const meters = [['LP trust', G.lpTrust, 'LPs decide the size of your next fund. Strong marks raise it; drift and bad quarters lower it.'], ['Reputation', G.rep, 'Opens doors with great founders and wins competitive deals.'], ['Network', G.net, 'Drives referrals and syndicate access.'], ['Founder rel.', G.founderRel, 'Average across your portfolio. Aggressive terms hurt it; it feeds referrals and follow-on access.']];
+  meters.forEach((mt, i) => {
+    const y = 176 + i * 28;
+    T(mt[0], rx + 16, y + 6, { s: 12, c: C.dim }); bar(rx + 110, y, 300, 10, mt[1] / 100, mt[1] > 55 ? C.green : mt[1] > 30 ? C.gold : C.red); T(String(Math.round(mt[1])), rx + 424, y + 6, { s: 12, w: 700, mono: true });
+    tip(rx + 16, y - 4, 420, 22, mt[2]);
+  });
+  const drift = driftLevel();
+  panel(rx, 316, rw, 120, 'PORTFOLIO CONSTRUCTION');
+  const act_ = activeHoldings(), total = sum(act_, h => h.invested) || 1, big = act_.reduce((a, h) => Math.max(a, h.invested), 0);
+  T(`${Object.keys(G.hold).length} companies · ${act_.length} active`, rx + 16, 354, { s: 12.5, w: 700 });
+  T(`Largest position ${fp(big / total, 0)} of cost · drift ${fp(drift, 0)} of last 8 off-thesis`, rx + 16, 376, { s: 12, c: drift > 0.3 ? C.red : C.dim });
+  T(`Reserves ${fp(G.reserveLeft / Math.max(1, G.size), 0)} of fund left · initial budget ${fm(Math.max(0, generalPowder()))}`, rx + 16, 398, { s: 12, c: C.dim });
+  const nB = Object.keys(G.hold).length; T(nB < 6 ? 'Style: concentrated' : nB < 14 ? 'Style: balanced' : 'Style: diversified', rx + 16, 420, { s: 12, c: C.gold, w: 700 });
+  panel(rx, 444, rw, 224, 'LP REPORTS');
+  const reps = G.reports.slice(-6).reverse();
+  if (!reps.length) T('Your first quarterly LP report goes out at the end of Q1.', rx + 16, 490, { s: 12, c: C.faint });
+  T('Qtr', rx + 16, 468, { s: 10, w: 800, c: C.faint }); ['TVPI', 'DPI', 'IRR', 'Trust'].forEach((c, i) => T(c, rx + 130 + i * 85, 468, { s: 10, w: 800, c: C.faint, a: 'right' }));
+  reps.forEach((r, i) => {
+    const y = 488 + i * 25;
+    T(`Y${r.year} Q${r.q}`, rx + 16, y, { s: 12, c: C.dim }); T(fx(r.tvpi), rx + 130, y, { s: 12, mono: true, a: 'right' }); T(fx(r.dpi), rx + 215, y, { s: 12, mono: true, a: 'right' });
+    T(r.irr == null ? '—' : fp(r.irr, 0), rx + 300, y, { s: 12, mono: true, a: 'right' }); T(String(Math.round(r.trust)), rx + 385, y, { s: 12, mono: true, a: 'right' });
+  });
+}
+
+// ---------------------------------------------------------------- office
+function drawOffice() {
+  panel(14, 90, 620, 270, 'PERSONAL WEALTH  (cars and staff come out of your pocket, not the fund)');
+  T(fm(G.cash), 30, 142, { s: 34, w: 900, mono: true, c: G.cash < 20000 ? C.red : C.text });
+  T('personal cash', 32, 168, { s: 11.5, c: C.dim });
+  const rows = [['Management fee (2% of fund)', annualFee()], ['Living costs', -LIVING_COST_YR], ['Car lease', G.car ? -CAR_COST_YR : 0], ['Analysts', -G.staff.analysts * ANALYST_YR], ['Scouts', -G.staff.scouts.length * SCOUT_YR]];
+  rows.forEach((r, i) => { T(r[0], 30, 196 + i * 22, { s: 12.5, c: C.dim }); T((r[1] >= 0 ? '+' : '−') + fm(Math.abs(r[1])) + '/yr', 400, 196 + i * 22, { s: 12.5, mono: true, a: 'right', c: r[1] > 0 ? C.green : r[1] < 0 ? C.text : C.faint }); });
+  const net = personalWeekly() * 52;
+  ctx.fillStyle = C.line; ctx.fillRect(30, 310, 380, 1);
+  T('Net per year', 30, 328, { s: 13, w: 700 }); T((net >= 0 ? '+' : '−') + fm(Math.abs(net)), 400, 328, { s: 14, w: 800, mono: true, a: 'right', c: net >= 0 ? C.green : C.red });
+  P('Carry is the real payoff, and it arrives late: only after exits return the fund.', 440, 190, 170, { s: 11.5, c: C.faint });
+  P(`GP commit already paid: ${fm(G.gp)}. The score counts fund returns, never personal assets.`, 440, 250, 170, { s: 11.5, c: C.faint });
+  // car
+  panel(646, 90, 620, 130, 'CAR');
+  P('One binary choice. Own a car and each local visit in your home city costs 1 AP less. Don\'t, and local visits cost normal AP. That is the whole mechanic.', 662, 120, 380, { s: 12.5, c: C.dim });
+  if (button('car', 1062, 140, 184, 56, G.car ? 'Return the car' : 'Lease a car', { kind: G.car ? 'danger' : 'primary', sub: G.car ? `saving 1 AP per local visit` : `${fm(CAR_COST_YR)}/yr` })) act(toggleCar());
+  // staff
+  panel(646, 228, 620, 252, 'STAFF  (paid from your fee income)');
+  T(`Analysts ${G.staff.analysts}/3`, 662, 268, { s: 13, w: 700 }); T(`${fm(ANALYST_YR)}/yr each · each cuts diligence noise ~12%`, 662, 288, { s: 11.5, c: C.dim });
+  if (button('han', 1100, 252, 70, 32, 'Hire', { disabled: G.staff.analysts >= 3, kind: 'good' })) act(hireAnalyst());
+  if (button('fan', 1176, 252, 70, 32, 'Fire', { disabled: !G.staff.analysts })) act(fireAnalyst());
+  T(`Scouts ${G.staff.scouts.length}/3`, 662, 334, { s: 13, w: 700 }); T(`${fm(SCOUT_YR)}/yr each · a steady trickle of mid-quality deals in one sector`, 662, 354, { s: 11.5, c: C.dim });
+  G.staff.scouts.forEach((sec, i) => { const b = 662 + i * 200; box(b, 376, 190, 30, C.panel2, C.line, 6); sectorDot(b + 14, 391, sec, 4); T(SECTOR_BY_ID[sec].name, b + 26, 391, { s: 12 }); if (button('fsc' + i, b + 150, 380, 36, 22, '✕', { s: 10 })) fireScout(i); });
+  if (G.staff.scouts.length < 3) {
+    T('Hire a scout in:', 662, 430, { s: 12, c: C.dim });
+    SECTORS.forEach((sc, i) => { if (button('hsc' + sc.id, 770 + (i % 4) * 118, 418 + Math.floor(i / 4) * 30, 112, 26, sc.name, { s: 10.5, r: 5 })) act(hireScout(sc.id)); });
+  }
+  // travel
+  panel(14, 368, 620, 300, 'TRAVEL  (commercial flights are free, always)');
+  const tr = [['Local visit (home city)', G.car ? COST.hqLocal - 1 : COST.hqLocal, G.car ? 'car saves 1 AP' : 'a car would save 1 AP'], ['Regional flight (same region)', COST.hqRegion, 'return trip same week'], ['Intercontinental', COST.hqFar, `+${4} AP lost next week; 15% delay risk`]];
+  tr.forEach((r, i) => { const y = 408 + i * 34; T(r[0], 30, y, { s: 13, w: 600 }); T(r[2], 30, y + 15, { s: 10.5, c: C.faint }); chip(560, y - 8, r[1] + ' AP', C.gold); });
+  P(`Travel is a modifier, not the game. Your home is ${CITY_BY_ID[G.home].name}. Startups elsewhere cost more AP to visit — decide whether the diligence is worth the time.`, 30, 520, 580, { s: 12.5, c: C.dim });
+  T('Coming later:', 30, 586, { s: 11, w: 800, c: C.faint });
+  ['Charter market', 'Fractional shares', 'Private jets & co-owners', 'Pilot training'].forEach((l, i) => { box(30 + i * 148, 600, 140, 26, C.bg, C.line, 6); ctx.globalAlpha = 0.5; T('· ' + l, 100 + i * 148, 613, { s: 10.5, a: 'center' }); ctx.globalAlpha = 1; });
+  T('Phases 2–4: fairs, rival dynamics, crypto sleeve, jets, Fund II.', 30, 646, { s: 11, c: C.faint });
+}
+
+// ---------------------------------------------------------------- market
+function drawMarket() {
+  panel(14, 90, 800, 330, 'SECTOR HEAT  (hype cycles inflate valuations and dry up when they pop)');
+  const series = SECTORS.map(sc => ({ col: sc.col, pts: G.heatHist.map(h => [h.w / 52, h.h[SECTORS.indexOf(sc)]]).concat([[G.week / 52, G.heat[sc.id]]]), lw: 2 }));
+  lineChart(24, 120, 780, 258, series, { xmin: 0, xmax: Math.max(2, G.week / 52 + 0.2), ymin: -1, ymax: 1, hline: 0, yfmt: v => (v > 0 ? '+' : '') + v.toFixed(1), xfmt: v => 'Y' + (Math.floor(v + 0.001) + 1), ticks: 4, xticks: Math.max(1, Math.min(6, Math.round(Math.max(2, G.week / 52 + 0.2)))) });
+  SECTORS.forEach((sc, i) => { const x = 28 + i * 112; ctx.fillStyle = sc.col; ctx.fillRect(x, 392, 8, 8); T(sc.name, x + 14, 396, { s: 11, c: C.dim }); T((G.heat[sc.id] >= 0 ? '+' : '') + (G.heat[sc.id] * 100).toFixed(0), x + 14, 410, { s: 11, mono: true, w: 700, c: G.heat[sc.id] > 0.4 ? C.amber : C.text }); });
+  const M = MACRO[G.macro.regime];
+  panel(826, 90, 440, 330, 'MACRO');
+  T(M.name, 846, 130, { s: 24, w: 900, c: M.col });
+  T(`since week ${G.macro.since + 1} · policy rate ${M.rate}`, 846, 156, { s: 12, c: C.dim });
+  [['Valuation multiple', `${(M.val * 100).toFixed(0)}%`], ['Exit multiples', `${(M.exit * 100).toFixed(0)}%`], ['IPO window', M.ipo >= 0.4 ? 'wide open' : M.ipo >= 0.15 ? 'open' : M.ipo > 0 ? 'barely' : 'shut'], ['Fundraising climate', M.raise > 0.3 ? 'easy' : M.raise > -0.3 ? 'normal' : M.raise > -0.9 ? 'tight' : 'frozen']].forEach((r, i) => { T(r[0], 846, 196 + i * 30, { s: 13, c: C.dim }); T(r[1], 1246, 196 + i * 30, { s: 14, w: 800, a: 'right', mono: true }); });
+  P('Regimes shift every quarter or so. Bull markets inflate prices and open IPO windows; recessions slash valuations and strand exits. Hold too long and the window closes.', 846, 324, 400, { s: 12, c: C.faint });
+  // rivals
+  panel(14, 428, W - 28, 240, 'RIVAL FIRMS  (founders pick on price, terms, brand, speed and value-add)');
+  ['Firm', 'Style', 'Brand', 'Stages', 'Rounds led'].forEach((c, i) => T(c, [30, 230, 560, 720, 900][i], 464, { s: 10.5, w: 800, c: C.faint }));
+  RIVALS.forEach((rv, i) => {
+    const y = 488 + i * 17.5;
+    T(rv.name, 30, y, { s: 12, w: 700, maxW: 190 }); T(rv.style, 230, y, { s: 11.5, c: C.dim, maxW: 320 });
+    bar(560, y - 4, 110, 8, rv.brand / 100, rv.brand > 80 ? C.gold : C.blue); T(String(rv.brand), 680, y, { s: 11, mono: true, c: C.dim });
+    T(rv.stages[0] === rv.stages[1] ? stageName(rv.stages[0]) : `${stageName(rv.stages[0])}–${stageName(rv.stages[1])}`, 720, y, { s: 11.5, c: C.dim });
+    T(String((G.rivalWins || {})[rv.id] || 0), 900, y, { s: 12, mono: true });
+  });
+  T(`Your brand: ${Math.round(G.rep)}. Early on you win only the deals nobody else wants.`, W - 40, 464, { s: 11.5, c: C.amber, a: 'right' });
+}
+
+// ---------------------------------------------------------------- modals
+function drawEventModal() {
+  const ev = G.queue[0];
+  if (!ev) return;
+  if (!eventValid(ev)) { G.queue.shift(); return; }
+  const v = eventView(ev), s = ev.sid ? G.startups[ev.sid] : null;
+  dim();
+  const w = 680;
+  let bodyH = 0; v.body.forEach(p => { bodyH += paraH(p, w - 56, 13.5, 20) + 8; });
+  const optH = v.opts.length * 58;
+  const h = 100 + bodyH + optH + 20, x = (W - w) / 2, y = Math.max(60, (H - h) / 2);
+  box(x, y, w, h, C.bg2, C.gold, 12);
+  chip(x + 22, y + 18, G.queue.length > 1 ? `DECISION · ${G.queue.length} waiting` : 'DECISION', C.gold, { s: 9.5 });
+  T(v.title, x + 22, y + 56, { s: 22, w: 900, maxW: w - 44 });
+  let yy = y + 82;
+  v.body.forEach(p => { const hh = P(p, x + 28, yy, w - 56, { s: 13.5, lh: 20, c: C.text }); yy += hh + 8; });
+  yy += 10;
+  v.opts.forEach((o, i) => {
+    needApCheck(o);
+    const cost = o.ap ? ` · ${o.ap} AP` : '';
+    if (button('ev' + i, x + 24, yy + i * 58, w - 48, 52, o.label + cost, { kind: i === 0 && !o.disabled ? 'primary' : 'ghost', sub: o.disabled && o.why ? o.why : o.sub, disabled: o.disabled, why: o.why, a: 'left', s: 14 })) {
+      const msg = resolveEvent(ev, o.id);
+      if (msg) flash(msg, 'info');
+      sfx('click'); drainToasts();
+    }
+  });
+}
+function needApCheck(o) { if (o.ap > G.ap) { o.disabled = true; o.why = `Needs ${o.ap} AP`; } }
+
+function drawMenu() {
+  dim();
+  const w = 420, h = 360, x = (W - w) / 2, y = 130;
+  box(x, y, w, h, C.bg2, C.line, 12);
+  T('Menu', x + 24, y + 30, { s: 22, w: 900 });
+  if (button('mresume', x + 24, y + 56, w - 48, 40, 'Resume', { kind: 'primary' })) S.menu = false;
+  if (button('msave', x + 24, y + 104, w - 48, 36, 'Save game', {})) { saveGame(); flash('Game saved.', 'good'); }
+  if (button('mload', x + 24, y + 148, w - 48, 36, 'Load saved game', { disabled: !hasSave() })) { loadGame(); S.menu = false; }
+  S.sound = toggle('msound', x + 24, y + 196, 'Sound effects', S.sound);
+  if (button('mnew', x + 24, y + 236, w - 48, 36, 'New game…', { kind: 'danger' })) { S.menu = false; initSetup(); S.screen = 'setup'; }
+  T(`Seed ${G.seed} — replay the same startups`, x + w / 2, y + 296, { s: 11.5, c: C.faint, a: 'center', mono: true });
+  T('Autosaves every week.', x + w / 2, y + 318, { s: 11.5, c: C.faint, a: 'center' });
+}
+
+function drawHelp() {
+  dim();
+  const w = 900, h = 560, x = (W - w) / 2, y = 80;
+  box(x, y, w, h, C.bg2, C.gold, 12);
+  T('How to run a fund', x + 28, y + 36, { s: 24, w: 900, c: C.gold });
+  const secs = [
+    ['The week', 'You get 10 action points (AP) each week. Spend them on deals, diligence and helping your portfolio, then End week. Unspent AP is lost.'],
+    ['The pipeline', 'Sourced → Screened → Meeting → Diligence → Term sheet. Each move costs AP, and founders need a week between steps. Rounds close; waiting loses deals.'],
+    ['Diligence', 'Startups have hidden stats: founder, product-market fit, burn, timing, integrity, tech. Each tool reveals some of them with noise (the confidence bars). Founders bluff — contradictions between tools are your signal. Frauds exist; skip diligence and they scam you in proportion.'],
+    ['Term sheets', 'Pick lead or follow, valuation, check size and terms. Founders choose between offers on price, terms, your brand, speed and value-add. Aggressive terms win returns but hurt founder relationships.'],
+    ['Your portfolio', 'Help founders with AP, follow on in winners (reserves!), take board seats, and decide when to sell. Outcomes follow a power law: most die, some return about 1x, a few return 50x or more.'],
+    ['The score', 'After 10 years: net IRR, TVPI and DPI of Fund I, plus a small reputation bonus. Personal assets never count — only carry does. LPs watch for thesis drift.'],
+  ];
+  let yy = y + 60;
+  secs.forEach(s => { T(s[0], x + 28, yy + 8, { s: 13, w: 800 }); const hh = P(s[1], x + 170, yy, w - 200, { s: 12.5, lh: 18, c: C.dim }); yy += Math.max(hh, 20) + 14; });
+  if (button('hclose', x + w - 168, y + h - 54, 140, 36, 'Got it', { kind: 'primary' })) S.help = false;
+  T('Tip: hover almost anything for an explanation.', x + 28, y + h - 36, { s: 12, c: C.faint });
+}
+
+function drawEnd() {
+  dim();
+  const m = G.final || fundMetrics(true), sc = scoreFund(m);
+  const w = 1000, h = 600, x = (W - w) / 2, y = 62;
+  box(x, y, w, h, C.bg2, C.gold, 14);
+  T('FUND I — FINAL REPORT', x + 30, y + 30, { s: 12, w: 800, c: C.faint });
+  T(G.fundName, x + 30, y + 62, { s: 28, w: 900 });
+  T(sc.grade, x + w - 90, y + 76, { s: 92, w: 900, c: sc.grade <= 'B' ? C.gold : C.dim, a: 'center' });
+  T(sc.title, x + 30, y + 92, { s: 15, c: C.gold, w: 700 });
+  T(`Score ${sc.score}  (returns ${sc.base} + reputation ${sc.repBonus})`, x + 30, y + 116, { s: 13, c: C.dim });
+  [['Net IRR', m.irr == null ? '—' : fp(m.irr, 1)], ['Net TVPI', fx(m.tvpi)], ['DPI', fx(m.dpi)], ['Carry to you', fm(G.carryPaid + m.carryUnpaid * 0)], ['Companies', String(Object.keys(G.hold).length)]].forEach((c, i) => {
+    T(c[0], x + 30 + i * 190, y + 160, { s: 11, w: 700, c: C.faint }); T(c[1], x + 30 + i * 190, y + 188, { s: 26, w: 900, mono: true });
+  });
+  T('Unrealised positions are valued at 85% of mark; DPI counts only cash returned.', x + 30, y + 212, { s: 11.5, c: C.faint });
+  const rows = Object.values(G.hold).map(h => ({ h, s: G.startups[h.sid], v: h.realized + positionValue(h, true) })).filter(r => r.s).sort((a, b) => b.v / Math.max(1, b.h.invested) - a.v / Math.max(1, a.h.invested));
+  panel(x + 24, y + 232, 460, 280, 'BEST CALLS');
+  rows.slice(0, 5).forEach((r, i) => { const yy = y + 270 + i * 40; T(r.s.name, x + 40, yy, { s: 13, w: 700 }); T(`${fm(r.h.invested)} → ${fm(r.v)}`, x + 40, yy + 17, { s: 11.5, c: C.dim }); T(fx(r.v / Math.max(1, r.h.invested), 1), x + 470, yy + 8, { s: 17, w: 900, mono: true, a: 'right', c: C.green }); });
+  if (!rows.length) T('You never invested. LPs are puzzled.', x + 40, y + 280, { s: 13, c: C.faint });
+  panel(x + 508, y + 232, 468, 280, 'THE ONES THAT GOT AWAY');
+  const got = G.ledger.map(l => ({ l, s: G.startups[l.sid] })).filter(r => r.s).map(r => ({ r, v: r.s.status === 'acquired' ? (r.s.exitEV || 0) : r.s.status === 'public' ? r.s.mcap : r.s.status === 'dead' ? 0 : lastPost(r.s) })).sort((a, b) => b.v - a.v).slice(0, 5);
+  got.forEach((g, i) => { const yy = y + 270 + i * 40; T(g.r.s.name, x + 524, yy, { s: 13, w: 700 }); T(`you passed: ${g.r.l.why}`, x + 524, yy + 17, { s: 11.5, c: C.dim, maxW: 280 }); T(g.v > 0 ? fm(g.v) : 'dead', x + 962, yy + 8, { s: 15, w: 800, mono: true, a: 'right', c: g.v > 100e6 ? C.red : C.dim }); });
+  if (!got.length) T('Nothing you passed on made headlines. Probably.', x + 524, y + 280, { s: 13, c: C.faint });
+  if (button('endnew', x + 30, y + h - 56, 220, 38, 'New fund (same seed)', { kind: 'ghost' })) { initSetup(); S.setup.seed = G.seed; S.screen = 'setup'; }
+  if (button('endnew2', x + 262, y + h - 56, 220, 38, 'New fund (new seed)', { kind: 'primary' })) { initSetup(); S.screen = 'setup'; }
+  if (button('endview', x + w - 190, y + h - 56, 160, 38, 'Review portfolio', {})) S.endShown = true;
+}
+
+// ============================================================================
+// MAIN: boot, canvas scaling, input, game loop, save / load
+// ============================================================================
+const SAVE_KEY = 'termsheet.save.v1';
+function localStorage_get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function localStorage_set(k, v) { try { localStorage.setItem(k, v); return true; } catch (e) { return false; } }
+const _rep = (k, v) => v === Infinity ? '__inf__' : v;
+const _rev = (k, v) => v === '__inf__' ? Infinity : v;
+function saveGame(silent) {
+  if (!G) return false;
+  const ok = localStorage_set(SAVE_KEY, JSON.stringify(G, _rep));
+  if (!ok && !silent) flash('Could not save (storage unavailable).', 'bad');
+  return ok;
+}
+function hasSave() { return !!localStorage_get(SAVE_KEY); }
+function loadGame() {
+  try {
+    const g = JSON.parse(localStorage_get(SAVE_KEY), _rev);
+    setG(g); g.toasts = []; S.screen = 'game'; S.modal = null; S.scroll = {}; S.selHold = 0; S.endShown = false; S.help = false;
+    flash('Game loaded.', 'good');
+  } catch (e) { flash('Could not load the save.', 'bad'); }
+}
+
+function drainToasts() { if (!G || !G.toasts) return; for (const t of G.toasts) flash(t.t, t.k); G.toasts.length = 0; }
+function afterWeek() {
+  drainToasts(); sfx('turn');
+  if (G.over) { G.queue.length = 0; S.modal = null; S.endShown = false; sfx('good'); }
+  saveGame(true);
+}
+function doEndTurn() { if (!G || G.over || G.queue.length) return; endTurn(); afterWeek(); }
+function doSkip(n) { if (!G || G.over || G.queue.length) return; const k = skipWeeks(n); afterWeek(); if (G.queue.length) flash(`Stopped after ${k} week${k === 1 ? '' : 's'}: a decision needs you.`, 'warn'); }
+
+// ---------------------------------------------------------------- canvas / input
+let _dpr = 1, _scale = 1, _offX = 0, _offY = 0, _last = 0;
+function resize() {
+  _dpr = window.devicePixelRatio || 1;
+  const w = window.innerWidth, h = window.innerHeight;
+  cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  cv.width = Math.round(w * _dpr); cv.height = Math.round(h * _dpr);
+  _scale = Math.min(w / W, h / H); _offX = (w - W * _scale) / 2; _offY = (h - H * _scale) / 2;
+}
+function toLogical(e) { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left - _offX) / _scale, (e.clientY - r.top - _offY) / _scale]; }
+
+function topLayer() {
+  if (G && G.over && !S.endShown && S.screen === 'game') return 'end';
+  if (S.help) return 'help';
+  if (S.menu) return 'menu';
+  if (G && G.queue.length && S.screen === 'game') return 'event';
+  if (S.modal) return 'deal';
+  return 'base';
+}
+function drawGame() {
+  const top = topLayer(), off = l => (top !== l ? 1 : 0);
+  UI.disabled += off('base');
+  drawFrame();
+  ({ pipeline: drawPipeline, portfolio: drawPortfolio, fund: drawFund, office: drawOffice, market: drawMarket }[S.tab] || drawPipeline)();
+  UI.disabled -= off('base');
+  if (S.modal) { UI.disabled += off('deal'); drawDealModal(); UI.disabled -= off('deal'); }
+  if (G.queue.length && !G.over) { UI.disabled += off('event'); drawEventModal(); UI.disabled -= off('event'); }
+  if (S.menu) { UI.disabled += off('menu'); drawMenu(); UI.disabled -= off('menu'); }
+  if (S.help) { UI.disabled += off('help'); drawHelp(); UI.disabled -= off('help'); }
+  if (G.over && !S.endShown) drawEnd();
+}
+
+function frame(ts) {
+  UI.dt = Math.min(0.05, (ts - _last) / 1000); _last = ts; UI.t += UI.dt;
+  UI.tips.length = 0; UI.cursor = 'default';
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#080c11'; ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.setTransform(_dpr * _scale, 0, 0, _dpr * _scale, _dpr * _offX, _dpr * _offY);
+  ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+  try {
+    if (S.screen === 'game' && G) { drainToasts(); drawGame(); }
+    else { if (!S.setup) initSetup(); drawSetup(); }
+    drawToasts(); drawTips();
+  } catch (e) { console.error(e); ctx.restore(); ctx.save(); T('Error: ' + e.message, 20, 20, { c: C.red }); window.__lastError = e; }
+  ctx.restore();
+  UI.pressed = false; UI.released = false; UI.wheel = 0; UI.keyQ.length = UI.focus ? UI.keyQ.length : 0;
+  if (!UI.down) UI.active = null;
+  UI.ox = 0; UI.oy = 0; UI.clips.length = 0; UI.stack.length = 0; UI.disabled = 0;
+  cv.style.cursor = UI.cursor;
+  requestAnimationFrame(frame);
+}
+
+function onKey(e) {
+  if (UI.focus) {
+    if (e.key === 'Escape' || e.key === 'Enter') { UI.focus = null; e.preventDefault(); return; }
+    if (e.key === 'Backspace' || e.key.length === 1) { UI.keyQ.push(e.key); e.preventDefault(); }
+    return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (S.screen !== 'game' || !G) return;
+  const top = topLayer();
+  if (e.key === 'Escape') { if (S.help) S.help = false; else if (S.menu) S.menu = false; else if (S.dealView.hq) S.dealView.hq = null; else if (S.modal) closeModal(); else S.menu = true; e.preventDefault(); return; }
+  if (top !== 'base') return;
+  if (e.key === ' ' || e.key === 'Enter') { doEndTurn(); e.preventDefault(); }
+  else if (e.key >= '1' && e.key <= '5') S.tab = TABS[+e.key - 1][0];
+}
+
+function boot() {
+  cv = document.getElementById('c'); ctx = cv.getContext('2d');
+  resize(); window.addEventListener('resize', resize);
+  const upd = e => { const p = toLogical(e); UI.mx = p[0]; UI.my = p[1]; };
+  cv.addEventListener('mousemove', upd);
+  cv.addEventListener('mousedown', e => { upd(e); UI.down = true; UI.pressed = true; });
+  window.addEventListener('mouseup', e => { upd(e); UI.down = false; UI.released = true; });
+  cv.addEventListener('mouseleave', () => { UI.mx = -1; UI.my = -1; });
+  cv.addEventListener('wheel', e => { UI.wheel += e.deltaY * 0.7; e.preventDefault(); }, { passive: false });
+  cv.addEventListener('contextmenu', e => e.preventDefault());
+  cv.addEventListener('touchstart', e => { const t = e.changedTouches[0]; upd(t); UI.down = true; UI.pressed = true; e.preventDefault(); }, { passive: false });
+  cv.addEventListener('touchmove', e => { upd(e.changedTouches[0]); e.preventDefault(); }, { passive: false });
+  cv.addEventListener('touchend', e => { UI.down = false; UI.released = true; e.preventDefault(); }, { passive: false });
+  window.addEventListener('keydown', onKey);
+  window.addEventListener('beforeunload', () => { if (S.screen === 'game' && G && !G.over) saveGame(true); });
+  window.__ts = { get G() { return G; }, S, UI, toPage: (x, y) => { const r = cv.getBoundingClientRect(); return [r.left + _offX + x * _scale, r.top + _offY + y * _scale]; }, api: { startNewGame, doEndTurn, doSkip, openDeal, advanceDeal, useTool, hqVisit, sendTermSheet, defaultTerms, resolveEvent, eventView, loadGame, saveGame, initSetup, newGame, closeModal } };
+  requestAnimationFrame(ts => { _last = ts; requestAnimationFrame(frame); });
+}
+if (typeof document !== 'undefined' && document.getElementById('c')) boot();
+
+</script>
+</body>
+</html>

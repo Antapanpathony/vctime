@@ -1,0 +1,63 @@
+// ============================================================================
+// METRICS: NAV, TVPI / DPI / net IRR, final scoring
+// ============================================================================
+
+function xirr(flows) {
+  let hasNeg = false, hasPos = false;
+  for (const f of flows) { if (f.a < 0) hasNeg = true; if (f.a > 0) hasPos = true; }
+  if (!hasNeg || !hasPos) return null;
+  const npv = r => { let t = 0; for (const f of flows) t += f.a / Math.pow(1 + r, f.w / 52); return t; };
+  let lo = -0.95, hi = 4;
+  let flo = npv(lo), fhi = npv(hi);
+  if (flo * fhi > 0) return flo > 0 ? hi : lo;
+  for (let i = 0; i < 80; i++) { const mid = (lo + hi) / 2, fm_ = npv(mid); if (flo * fm_ <= 0) { hi = mid; fhi = fm_; } else { lo = mid; flo = fm_; } }
+  return (lo + hi) / 2;
+}
+
+function positionValue(h, final) {
+  const s = G.startups[h.sid];
+  if (!s) return 0;
+  if (s.status === 'public') return publicValue(h);
+  const v = holdingMark(h);
+  return final ? v * 0.85 : v;
+}
+
+function fundMetrics(final) {
+  let nav = Math.max(0, G.fundCash);
+  for (const h of activeHoldings()) nav += positionValue(h, final);
+  const paidIn = Math.max(1, G.called);
+  const carryAccrued = CARRY_PCT * Math.max(0, G.dist + nav - paidIn);
+  const carryUnpaid = Math.max(0, carryAccrued - G.carryPaid);
+  const netNav = nav - carryUnpaid;
+  const dpi = (G.dist - G.carryPaid) / paidIn;
+  const tvpi = (G.dist - G.carryPaid + netNav) / paidIn;
+  const irr = G.week < 52 && !final ? null : xirr(G.flows.concat([{ w: G.week, a: netNav }]));
+  return { nav, netNav, paidIn, tvpi, dpi, irr, carryAccrued, carryUnpaid };
+}
+
+function scoreFund(m) {
+  const irr = m.irr == null ? -0.2 : m.irr;
+  const a = clamp(irr / 0.25, 0, 1), b = clamp((m.tvpi - 1) / 2.5, 0, 1), c = clamp(m.dpi / 3, 0, 1);
+  const base = 100 * (0.35 * a + 0.35 * b + 0.30 * c);
+  const repBonus = clamp(G.rep / 100, 0, 1) * 6;
+  const score = Math.round(base + repBonus);
+  const T = [
+    [92, 'S', 'Hall of Fame GP'], [78, 'A', 'Top-decile manager'], [60, 'B', 'Top-quartile manager'],
+    [42, 'C', 'Respectable median'], [22, 'D', 'LPs politely stop returning your calls'], [0, 'F', 'The haircut was the best investment you made'],
+  ];
+  const t = T.find(x => score >= x[0]);
+  return { score, base: Math.round(base), repBonus: Math.round(repBonus * 10) / 10, grade: t[1], title: t[2] };
+}
+
+// helper summaries for UI
+function portfolioRows() {
+  const rows = [];
+  for (const h of Object.values(G.hold)) {
+    const s = G.startups[h.sid]; if (!s) continue;
+    const active = h.status === 'active';
+    const mark = active ? positionValue(h) : 0;
+    rows.push({ h, s, active, mark, moic: (mark + h.realized) / Math.max(1, h.invested), own: ownPct(s, h) });
+  }
+  rows.sort((a, b) => (b.active - a.active) || (b.mark + b.h.realized) - (a.mark + a.h.realized));
+  return rows;
+}
