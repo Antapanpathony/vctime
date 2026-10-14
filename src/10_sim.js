@@ -18,7 +18,7 @@ function newGame(o) {
   const size = o.size || 5e6;
   const gp = Math.round(size * 0.02);
   const g = {
-    v: 1, seed, rng: mkrng(hashStr(seed + ':world')), week: 0, ap: AP_BASE, apDebt: 0, over: false,
+    v: 1, seed, rng: mkrng(hashStr(seed + ':world')), wr: mkrng(hashStr(seed + ':open')), gc: {}, week: 0, ap: AP_BASE, apDebt: 0, over: false,
     fundName: o.fundName || 'Bad Haircut Ventures', home: o.home || 'sf', size,
     thesis: Object.assign({ smin: 0, smax: 1, sectors: ['ai', 'saas'], geo: 'region', check: 0.05 }, o.thesis || {}),
     reservePct: o.reservePct != null ? o.reservePct : 0.35,
@@ -148,7 +148,7 @@ function pickCity(r, bias) {
 
 function genStartup(o) {
   const id = G.nextId++;
-  const r = mkrng(hashStr(G.seed + ':s' + id));
+  const r = mkrng(hashStr(G.seed + ':s:' + (o.key || id)));
   const sec = SECTOR_BY_ID[o.sector];
   const Q = clamp(o.q, 4, 97);
   const h = {};
@@ -171,7 +171,7 @@ function genStartup(o) {
     saleBoost: 1, shock: 0, stallUntil: 0,
   };
   s.founder.quirk = pickQuirk(r, h);
-  s.potential = 12e6 * Math.exp(0.095 * (0.45 * h.P + 0.25 * h.T + 0.3 * h.F - 50)) * Math.exp(rg(r, 0, 0.5)) * (s.breakout ? 2.6 : 1);
+  s.potential = 12e6 * Math.exp(0.125 * (0.45 * h.P + 0.25 * h.T + 0.3 * h.F - 50)) * Math.exp(rg(r, 0, 0.5)) * (s.breakout ? 2.6 : 1);
   s.dress = fraud ? rr(r, 0.35, 0.8) : Math.max(0, (100 - h.I) / 100 * rr(r, 0.05, 0.25));
   setupFinancials(s, o.stage);
   openRound(s, o.stage, o.fast);
@@ -236,10 +236,11 @@ function openRound(s, k, fast) {
   const [wa, wb] = st.weeksOpen;
   s.round = {
     stage: k, fair, ask: fair * greed, raise, safe, poolPct: 0.10, greed,
-    start: G.week, end: G.week + (fast ? ri(r, 2, 3) : ri(r, wa, wb)), signal: 0, prep: 0, mySlice: 0, taken: false,
+    start: G.week, end: G.week + (fast ? ri(r, 2, 3) : ri(r, wa, wb)), signal: 0, prep: s.nextPrep || 0, mySlice: 0, taken: false,
     rivals: makeRivals(s, k, fair, greed),
   };
   if (safe) s.round.ask = s.round.ask * 1.05; // cap is quoted post-money-ish
+  s.nextPrep = 0;
   return s.round;
 }
 
@@ -247,7 +248,7 @@ function marketQ(s) { return 0.4 * s.h.F + 0.4 * s.h.P + 0.2 * s.h.T; }
 function makeRivals(s, k, fair, greed) {
   const r = s.rs;
   const qm = marketQ(s) + rg(r, 0, 4);
-  const stageF = [0.7, 1.0, 1.2, 1.3, 1.3, 1.3, 1.3, 1.3][k];
+  const stageF = [0.7, 1.0, 1.2, 1.3, 1.3, 1.3, 1.3, 1.3, 1.3, 1.3][k];
   const lam = clamp((qm - 38) / 16, 0, 3.2) * (1 + 0.35 * sectorHeat(s.sector)) * stageF * (s.fraud ? 0.5 : 1);
   const n = Math.min(4, rpois(r, lam));
   const out = [];
@@ -427,7 +428,10 @@ function recordHistory() {
   G.hist.push({ w: G.week, tvpi: m.tvpi, dpi: m.dpi, nav: m.nav, paid: m.paidIn, dist: G.dist });
 }
 
+// deterministic per (company, week) so event screens never flicker or churn the RNG
+function hash01(str) { return hashStr(str) / 4294967296; }
 function acqhireEV(s) {
   const M = MACRO[G.macro.regime];
-  return Math.max(s.cash * 0.6, headcount(s) * rr(s.rs, 0.05e6, 0.28e6) * M.val + arr(s) * 0.6);
+  const f = 0.05e6 + 0.23e6 * hash01(s.id + ':ah:' + G.week);
+  return Math.max(s.cash * 0.6, headcount(s) * f * M.val + arr(s) * 0.6);
 }

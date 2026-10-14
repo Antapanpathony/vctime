@@ -276,7 +276,7 @@ function closeDeal(d, t) {
   h.diligence = diligenceCoverage(d);
   h.stage0 = rd.stage; h.q0 = s.q; h.entryW = G.week; h.entryPost = rec.post;
   if (s.fraud) h.fraudAt = G.week + ri(G.rng, 10, 60);
-  G.recent.push(!thesisFit(s).ok);
+  G.recent.push(!thesisFit(s).ok); if (G.recent.length > 30) G.recent.shift();
   G.stats.closed++;
   if (lead) G.rep = Math.min(100, G.rep + 0.3);
   if (rd.rivals.length) G.net += 0.4;
@@ -311,11 +311,14 @@ function helpAction(h, type) {
   const bump = (st, amt) => { const used = s.helped[st] || 0; const room = Math.max(0, 12 - used); const d = Math.min(room, amt); s.h[st] = Math.min(98, s.h[st] + d); s.helped[st] = used + d; return d; };
   if (rf(G.rng) >= p) { logMsg(`${HELP_INFO[type].name} for ${s.name} didn't land this time.`, 'info'); return okr('It didn\'t land.', { landed: false }); }
   let msg = '';
-  if (type === 'intro') { if (s.round) s.round.prep += 0.35; else s.nextPrep = (s.nextPrep || 0) + 0.35; G.net += 0.4; msg = 'Two good investors took the call.'; }
-  if (type === 'hire') { bump('F', rr(G.rng, 1.5, 3.5)); msg = 'A strong senior hire signed.'; }
-  if (type === 'raise') { if (s.round) s.round.prep += 0.5; else s.nextPrep = (s.nextPrep || 0) + 0.5; msg = 'The pitch narrative got sharper.'; }
-  if (type === 'pivot') { const d = bump('P', s.h.P < 55 ? rr(G.rng, 3, 9) : rr(G.rng, 0.5, 2)); if (s.h.P < 55) s.gMod += 0.004; msg = 'The new positioning resonated.'; }
-  if (type === 'cust') { bump('P', rr(G.rng, 1, 3)); s.mrr *= 1 + rr(G.rng, 0.03, 0.09); G.net += 0.3; msg = 'Three new customers signed.'; }
+  // diminishing returns: every extra favour to the same company works less well
+  s.helpN = s.helpN || {}; const n = s.helpN[type] = (s.helpN[type] || 0) + 1;
+  const dm = Math.pow(0.8, n - 1);
+  if (type === 'intro') { if (s.round) s.round.prep = Math.min(0.8, s.round.prep + 0.35 * dm); else s.nextPrep = Math.min(0.8, (s.nextPrep || 0) + 0.35 * dm); G.net = Math.min(100, G.net + 0.4 * (1 - G.net / 100)); msg = 'Two good investors took the call.'; }
+  if (type === 'hire') { bump('F', rr(G.rng, 1.5, 3.5) * dm); msg = 'A strong senior hire signed.'; }
+  if (type === 'raise') { if (s.round) s.round.prep = Math.min(0.8, s.round.prep + 0.5 * dm); else s.nextPrep = Math.min(0.8, (s.nextPrep || 0) + 0.5 * dm); msg = 'The pitch narrative got sharper.'; }
+  if (type === 'pivot') { bump('P', (s.h.P < 55 ? rr(G.rng, 3, 9) : rr(G.rng, 0.5, 2)) * dm); if (s.h.P < 55) s.gMod += 0.004 * dm; msg = 'The new positioning resonated.'; }
+  if (type === 'cust') { bump('P', rr(G.rng, 1, 3) * dm); s.mrr *= 1 + rr(G.rng, 0.03, 0.08) * dm; G.net = Math.min(100, G.net + 0.3 * (1 - G.net / 100)); msg = 'Three new customers signed.'; }
   G.vaScore = Math.min(1, G.vaScore + 0.02); G.rep = Math.min(100, G.rep + 0.05);
   h.rel = Math.min(100, h.rel + 1);
   logMsg(`${HELP_INFO[type].name} for ${s.name}: ${msg}`, 'good');

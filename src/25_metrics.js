@@ -2,16 +2,31 @@
 // METRICS: NAV, TVPI / DPI / net IRR, final scoring
 // ============================================================================
 
+// Net IRR: finds the economically meaningful root nearest to 0% (late fee calls can create several sign changes)
 function xirr(flows) {
   let hasNeg = false, hasPos = false;
   for (const f of flows) { if (f.a < 0) hasNeg = true; if (f.a > 0) hasPos = true; }
   if (!hasNeg || !hasPos) return null;
   const npv = r => { let t = 0; for (const f of flows) t += f.a / Math.pow(1 + r, f.w / 52); return t; };
-  let lo = -0.95, hi = 4;
-  let flo = npv(lo), fhi = npv(hi);
-  if (flo * fhi > 0) return flo > 0 ? hi : lo;
-  for (let i = 0; i < 80; i++) { const mid = (lo + hi) / 2, fm_ = npv(mid); if (flo * fm_ <= 0) { hi = mid; fhi = fm_; } else { lo = mid; flo = fm_; } }
-  return (lo + hi) / 2;
+  const f0 = npv(0);
+  if (Math.abs(f0) < 1) return 0;
+  const dir = f0 > 0 ? 1 : -1;
+  let prev = 0, fprev = f0;
+  for (let i = 1; i <= 400; i++) {
+    const r = dir > 0 ? i * 0.01 : -i * 0.0024, fr = npv(r);
+    if (fr * fprev <= 0) {
+      let lo = Math.min(prev, r), hi = Math.max(prev, r), flo = npv(lo);
+      for (let k = 0; k < 50; k++) { const mid = (lo + hi) / 2, fmid = npv(mid); if (flo * fmid <= 0) hi = mid; else { lo = mid; flo = fmid; } }
+      return (lo + hi) / 2;
+    }
+    prev = r; fprev = fr;
+  }
+  if (dir > 0) return 4;
+  // no root (late fee calls after distributions): fall back to a modified IRR from weighted durations
+  let neg = 0, pos = 0, tn = 0, tp = 0;
+  for (const f of flows) { if (f.a < 0) { neg -= f.a; tn -= f.a * f.w; } else { pos += f.a; tp += f.a * f.w; } }
+  const yrs = Math.max(1, (tp / Math.max(1, pos) - tn / Math.max(1, neg)) / 52);
+  return Math.max(-0.95, Math.pow(Math.max(0.001, pos / neg), 1 / yrs) - 1);
 }
 
 function positionValue(h, final) {
@@ -39,7 +54,7 @@ function scoreFund(m) {
   const irr = m.irr == null ? -0.2 : m.irr;
   const a = clamp(irr / 0.25, 0, 1), b = clamp((m.tvpi - 1) / 2.5, 0, 1), c = clamp(m.dpi / 3, 0, 1);
   const base = 100 * (0.35 * a + 0.35 * b + 0.30 * c);
-  const repBonus = clamp(G.rep / 100, 0, 1) * 6;
+  const repBonus = clamp((0.6 * G.rep + 0.4 * G.lpTrust) / 100, 0, 1) * 6;
   const score = Math.round(base + repBonus);
   const T = [
     [92, 'S', 'Hall of Fame GP'], [78, 'A', 'Top-decile manager'], [60, 'B', 'Top-quartile manager'],

@@ -104,7 +104,16 @@ function drawHoldingDetail(r, x, y, w, h_) {
   chip(x + 16, yy, h.board ? 'BOARD SEAT' : 'no board seat', h.board ? C.green : C.faint, { s: 9.5 });
   chip(x + 110, yy, h.prorata ? 'PRO-RATA RIGHTS' : 'no pro-rata rights', h.prorata ? C.green : C.faint, { s: 9.5 });
   if (s.round && !s.round.taken) chip(x + 240, yy, `Raising ${stageName(s.round.stage)}`, C.gold, { s: 9.5 });
-  yy += 26;
+  yy += 24;
+  if (r.active) {
+    T('YOUR READ', x + 16, yy + 6, { s: 10.5, w: 800, c: C.faint });
+    STATS.forEach((st, i) => {
+      const k = s.know[st], bx_ = x + 96 + (i % 3) * 120, by = yy - (i < 3 ? 0 : -16);
+      T(STAT_SHORT[st], bx_, by + 6, { s: 10.5, c: C.dim });
+      T(k ? ratingWord(k.m) : '?', bx_ + 52, by + 6, { s: 10.5, w: 700, c: k ? ratingCol(k.m) : C.faint });
+    });
+    yy += 38;
+  }
   // cap table
   T('CAP TABLE', x + 16, yy + 6, { s: 10.5, w: 800, c: C.faint });
   const cap = capRows(s);

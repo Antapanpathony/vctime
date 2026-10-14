@@ -1,0 +1,13 @@
+{
+  "name": "term-sheet",
+  "version": "0.1.0",
+  "description": "Term Sheet — a single-file, offline VC fund-management game on Canvas 2D (Phase 1: the investing core).",
+  "private": true,
+  "scripts": {
+    "build": "node build.js",
+    "test": "node tools/fuzz.js 8 && node tools/smoke2.js",
+    "test:sim": "node tools/fuzz.js 12",
+    "test:ui": "node build.js && node tools/smoke2.js",
+    "balance": "node tools/balance.js 2 && node tools/efficiency.js 2000 1 && node tools/playbot.js 6 2"
+  }
+}

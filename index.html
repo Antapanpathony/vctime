@@ -108,12 +108,12 @@ const REGION_NAMES = { AM: 'Americas', EU: 'Europe / ME', AS: 'Asia' };
 
 // bench = ARR needed to raise *this* round; pre/raise = fair round at r=1, neutral market
 const STAGES = [
-  { id: 'preseed', short: 'Pre-seed', pre: 4.5e6,  raise: 0.9e6, bench: 0,      damp: 1.2, burnMo: 40e3,  weeksOpen: [8, 13] },
-  { id: 'seed',    short: 'Seed',     pre: 12e6,   raise: 2.5e6, bench: 150e3,  damp: 1.05, burnMo: 110e3, weeksOpen: [8, 13] },
-  { id: 'a',       short: 'Series A', pre: 32e6,   raise: 10e6,  bench: 0.9e6,  damp: 0.95, burnMo: 380e3, weeksOpen: [8, 13] },
-  { id: 'b',       short: 'Series B', pre: 105e6,  raise: 28e6,  bench: 3.4e6,  damp: 0.9, burnMo: 1.0e6, weeksOpen: [8, 13] },
-  { id: 'c',       short: 'Series C', pre: 290e6,  raise: 65e6,  bench: 10e6,   damp: 0.85, burnMo: 2.4e6, weeksOpen: [8, 13] },
-  { id: 'g',       short: 'Growth',   pre: 720e6,  raise: 130e6, bench: 28e6,   damp: 0.8, burnMo: 5e6,   weeksOpen: [8, 13] },
+  { id: 'preseed', short: 'Pre-seed', pre: 3.6e6,  raise: 0.9e6, bench: 0,      damp: 1.2, burnMo: 40e3,  weeksOpen: [8, 13] },
+  { id: 'seed',    short: 'Seed',     pre: 10e6,   raise: 2.5e6, bench: 150e3,  damp: 1.05, burnMo: 110e3, weeksOpen: [8, 13] },
+  { id: 'a',       short: 'Series A', pre: 38e6,   raise: 10e6,  bench: 0.9e6,  damp: 0.95, burnMo: 380e3, weeksOpen: [8, 13] },
+  { id: 'b',       short: 'Series B', pre: 130e6,  raise: 28e6,  bench: 3.4e6,  damp: 0.9, burnMo: 1.0e6, weeksOpen: [8, 13] },
+  { id: 'c',       short: 'Series C', pre: 360e6,  raise: 65e6,  bench: 10e6,   damp: 0.85, burnMo: 2.4e6, weeksOpen: [8, 13] },
+  { id: 'g',       short: 'Growth',   pre: 900e6,  raise: 130e6, bench: 28e6,   damp: 0.8, burnMo: 5e6,   weeksOpen: [8, 13] },
 ];
 
 const MACRO = {
@@ -167,6 +167,7 @@ const CASHCOST = { tech: 4000, bg: 2500, legalSafe: 2500, legalPriced: 9000 };
 
 const stg = k => STAGES[Math.min(5, Math.max(0, k))];
 const stageName = k => k <= 5 ? STAGES[Math.max(0, k)].short : 'Growth ' + (k - 4);
+const ratingWord = m => m >= 72 ? 'Strong' : m >= 58 ? 'Good' : m >= 44 ? 'Mixed' : m >= 30 ? 'Weak' : 'Poor';
 
 // ============================================================================
 // SIM: game state, startups, cap tables, rounds, exits
@@ -188,7 +189,7 @@ function newGame(o) {
   const size = o.size || 5e6;
   const gp = Math.round(size * 0.02);
   const g = {
-    v: 1, seed, rng: mkrng(hashStr(seed + ':world')), week: 0, ap: AP_BASE, apDebt: 0, over: false,
+    v: 1, seed, rng: mkrng(hashStr(seed + ':world')), wr: mkrng(hashStr(seed + ':open')), gc: {}, week: 0, ap: AP_BASE, apDebt: 0, over: false,
     fundName: o.fundName || 'Bad Haircut Ventures', home: o.home || 'sf', size,
     thesis: Object.assign({ smin: 0, smax: 1, sectors: ['ai', 'saas'], geo: 'region', check: 0.05 }, o.thesis || {}),
     reservePct: o.reservePct != null ? o.reservePct : 0.35,
@@ -318,7 +319,7 @@ function pickCity(r, bias) {
 
 function genStartup(o) {
   const id = G.nextId++;
-  const r = mkrng(hashStr(G.seed + ':s' + id));
+  const r = mkrng(hashStr(G.seed + ':s:' + (o.key || id)));
   const sec = SECTOR_BY_ID[o.sector];
   const Q = clamp(o.q, 4, 97);
   const h = {};
@@ -341,7 +342,7 @@ function genStartup(o) {
     saleBoost: 1, shock: 0, stallUntil: 0,
   };
   s.founder.quirk = pickQuirk(r, h);
-  s.potential = 12e6 * Math.exp(0.095 * (0.45 * h.P + 0.25 * h.T + 0.3 * h.F - 50)) * Math.exp(rg(r, 0, 0.5)) * (s.breakout ? 2.6 : 1);
+  s.potential = 12e6 * Math.exp(0.125 * (0.45 * h.P + 0.25 * h.T + 0.3 * h.F - 50)) * Math.exp(rg(r, 0, 0.5)) * (s.breakout ? 2.6 : 1);
   s.dress = fraud ? rr(r, 0.35, 0.8) : Math.max(0, (100 - h.I) / 100 * rr(r, 0.05, 0.25));
   setupFinancials(s, o.stage);
   openRound(s, o.stage, o.fast);
@@ -406,10 +407,11 @@ function openRound(s, k, fast) {
   const [wa, wb] = st.weeksOpen;
   s.round = {
     stage: k, fair, ask: fair * greed, raise, safe, poolPct: 0.10, greed,
-    start: G.week, end: G.week + (fast ? ri(r, 2, 3) : ri(r, wa, wb)), signal: 0, prep: 0, mySlice: 0, taken: false,
+    start: G.week, end: G.week + (fast ? ri(r, 2, 3) : ri(r, wa, wb)), signal: 0, prep: s.nextPrep || 0, mySlice: 0, taken: false,
     rivals: makeRivals(s, k, fair, greed),
   };
   if (safe) s.round.ask = s.round.ask * 1.05; // cap is quoted post-money-ish
+  s.nextPrep = 0;
   return s.round;
 }
 
@@ -417,7 +419,7 @@ function marketQ(s) { return 0.4 * s.h.F + 0.4 * s.h.P + 0.2 * s.h.T; }
 function makeRivals(s, k, fair, greed) {
   const r = s.rs;
   const qm = marketQ(s) + rg(r, 0, 4);
-  const stageF = [0.7, 1.0, 1.2, 1.3, 1.3, 1.3, 1.3, 1.3][k];
+  const stageF = [0.7, 1.0, 1.2, 1.3, 1.3, 1.3, 1.3, 1.3, 1.3, 1.3][k];
   const lam = clamp((qm - 38) / 16, 0, 3.2) * (1 + 0.35 * sectorHeat(s.sector)) * stageF * (s.fraud ? 0.5 : 1);
   const n = Math.min(4, rpois(r, lam));
   const out = [];
@@ -597,9 +599,12 @@ function recordHistory() {
   G.hist.push({ w: G.week, tvpi: m.tvpi, dpi: m.dpi, nav: m.nav, paid: m.paidIn, dist: G.dist });
 }
 
+// deterministic per (company, week) so event screens never flicker or churn the RNG
+function hash01(str) { return hashStr(str) / 4294967296; }
 function acqhireEV(s) {
   const M = MACRO[G.macro.regime];
-  return Math.max(s.cash * 0.6, headcount(s) * rr(s.rs, 0.05e6, 0.28e6) * M.val + arr(s) * 0.6);
+  const f = 0.05e6 + 0.23e6 * hash01(s.id + ':ah:' + G.week);
+  return Math.max(s.cash * 0.6, headcount(s) * f * M.val + arr(s) * 0.6);
 }
 
 // ============================================================================
@@ -632,12 +637,13 @@ function stepStartup(s) {
   if (s.mrr < 400 && s.done < 1) s.mrr += rr(r, 0, 60) * Math.max(0, g * 8); // pre-revenue trickle
   else s.mrr = Math.max(0, s.mrr * (1 + gw));
   if (gw > 0) s.expense *= 1 + (s.mrr > s.expense * 0.8 ? 0.9 : 0.5) * gw;
+  if (gw < 0.004 && s.mrr > 100e3) s.expense += (s.mrr * 0.92 - s.expense) * 0.06; // growth stalled: management cuts to break-even
   s.expense = Math.max(s.expense, s.mrr * 0.35);
   s.cash -= netBurn(s) / 4.345;
   // fundraising state machine
   if (s.round) {
     if (!s.round.taken && G.week >= s.round.end) resolveRound(s);
-  } else if (s.done < 8) {
+  } else if (s.done < 9) {
     const rw_ = runwayMo(s);
     const strong = perceivedRatio(s, s.done + 1) > 1.6 && rw_ < 15 && rc(r, 0.03);
     if (rw_ < 7 || strong) startRaise(s);
@@ -657,7 +663,7 @@ function stepStartup(s) {
 
 function startRaise(s) {
   const k = s.done + 1;
-  if (k > 8) return;
+  if (k > 9) return;
   openRound(s, k, false);
   const h = G.hold[s.id];
   if (h && h.status === 'active') {
@@ -762,6 +768,7 @@ function writeOff(h, recovered, why) {
   h.realized += recovered; h.status = 'written-off'; h.exitW = G.week;
   G.stats.writeoffs++;
   G.rep = Math.max(0, G.rep - 0.25);
+  G.lpTrust = Math.max(0, G.lpTrust - Math.min(3, (h.invested - recovered) / G.size * 15));
   const loss = h.invested - recovered;
   logMsg(`${s.name} ${why || 'shut down'}. You lose ${fm(loss)} (${recovered > 0 ? 'recovered ' + fm(recovered) : 'nothing recovered'}).`, 'bad');
   G.realizedLog.push({ sid: h.sid, name: s.name, invested: h.invested, got: h.realized, w: G.week, kind: 'writeoff' });
@@ -771,7 +778,7 @@ function writeOff(h, recovered, why) {
 function exitMult(s) {
   const M = MACRO[G.macro.regime];
   const base = [4, 6, 9, 10.5, 11.5, 12.5][Math.min(5, s.done)];
-  return base * Math.pow(SECTOR_BY_ID[s.sector].em, 0.7) * M.exit * (1 + 0.25 * sectorHeat(s.sector)) * (s.breakout ? 1.25 : 1);
+  return base * Math.pow(SECTOR_BY_ID[s.sector].em, 0.7) * M.exit * (1 + 0.25 * sectorHeat(s.sector)) * (s.breakout ? 1.25 : 1) * clamp(0.8 + 4 * growthMo(s), 0.7, 1.7);
 }
 function exitInterest(s, h, held) {
   const r = s.rs, a = arr(s);
@@ -781,7 +788,7 @@ function exitInterest(s, h, held) {
   if (s.done >= 3 && a > 35e6 && M.ipo > 0) {
     const p = M.ipo * 0.02 * clamp(a / 60e6, 0.5, 2) * (1 + sectorHeat(s.sector));
     if (rc(r, p)) {
-      const ev = a * 14 * M.exit * rr(r, 0.85, 1.3) * (s.breakout ? 1.3 : 1) * (1 + 0.3 * sectorHeat(s.sector));
+      const ev = a * 14 * M.exit * rr(r, 0.85, 1.3) * (s.breakout ? 1.3 : 1) * (1 + 0.3 * sectorHeat(s.sector)) * clamp(0.8 + 4 * growthMo(s), 0.7, 1.7);
       if (held) { if (!pendingOffer(s.id)) pushEvent('exitoffer', s.id, { kind: 'ipo', ev, cash: false }); }
       else goPublic(s, ev, 0.04);
       return;
@@ -809,7 +816,7 @@ function goPublic(s, ev, vol) {
 }
 function stepPublic(s) {
   const M = MACRO[G.macro.regime];
-  const r = G.rng;
+  const r = s.rs;
   s.mcap *= Math.exp(M.drift + 0.0006 * (s.q - 50) / 50 + rg(r, 0, s.vol || 0.04));
   const h = G.hold[s.id];
   if (!h || h.status !== 'active') { if (G.week - (s.ipoW || 0) > 30) s.status = 'exited'; }
@@ -844,11 +851,11 @@ function makeDeal(s, channel) {
 }
 function genQ(channel) {
   switch (channel) {
-    case 'referral': return rg(G.rng, 62, 11);
-    case 'scout': return rg(G.rng, 55, 12);
-    case 'cold': return rg(G.rng, 40, 15);
-    case 'hot': return rg(G.rng, 82, 5);
-    default: return rg(G.rng, 44, 14);
+    case 'referral': return rg(G.wr, 62, 11);
+    case 'scout': return rg(G.wr, 55, 12);
+    case 'cold': return rg(G.wr, 40, 15);
+    case 'hot': return rg(G.wr, 82, 5);
+    default: return rg(G.wr, 44, 14);
   }
 }
 const STAGE_W = [0.36, 0.34, 0.17, 0.08, 0.035, 0.015];
@@ -857,41 +864,42 @@ function sourceDeal(channel, opts) {
   const t = G.thesis, bias = biasFactor();
   let sector = opts.sector;
   if (!sector) {
-    if (rc(G.rng, 0.5 * bias) && t.sectors.length) sector = rp(G.rng, t.sectors);
-    else sector = rw(G.rng, SECTORS, x => 1 + Math.max(-0.6, sectorHeat(x.id))).id;
+    if (rc(G.wr, 0.5 * bias) && t.sectors.length) sector = rp(G.wr, t.sectors);
+    else sector = rw(G.wr, SECTORS, x => 1 + Math.max(-0.6, sectorHeat(x.id))).id;
   }
   let stage = opts.stage;
   if (stage == null) {
-    if (rc(G.rng, (channel === 'cold' ? 0.8 : 0.55) * bias)) stage = ri(G.rng, t.smin, t.smax);
-    else stage = rw(G.rng, [0, 1, 2, 3, 4, 5], i => STAGE_W[i]);
+    if (rc(G.wr, (channel === 'cold' ? 0.8 : 0.55) * bias)) stage = ri(G.wr, t.smin, t.smax);
+    else stage = rw(G.wr, [0, 1, 2, 3, 4, 5], i => STAGE_W[i]);
   }
   let city = opts.city;
   if (!city) {
-    if (t.geo === 'local' && rc(G.rng, 0.35 * bias)) city = G.home;
-    else if (t.geo === 'region' && rc(G.rng, 0.3 * bias)) { const same = CITIES.filter(c => c.region === CITY_BY_ID[G.home].region); city = rp(G.rng, same).id; }
-    else city = pickCity(G.rng, bias);
+    if (t.geo === 'local' && rc(G.wr, 0.35 * bias)) city = G.home;
+    else if (t.geo === 'region' && rc(G.wr, 0.3 * bias)) { const same = CITIES.filter(c => c.region === CITY_BY_ID[G.home].region); city = rp(G.wr, same).id; }
+    else city = pickCity(G.wr, bias);
   }
   const q = opts.q != null ? opts.q : genQ(channel);
-  const s = genStartup({ q, sector, stage, city, fast: channel === 'hot' });
+  const kk = G.week + ':' + channel; G.gc[kk] = (G.gc[kk] || 0) + 1;
+  const s = genStartup({ q, sector, stage, city, fast: channel === 'hot', key: kk + ':' + G.gc[kk] });
   if (channel === 'hot') { // guarantee competition
     const f = RIVALS.filter(x => stage >= x.stages[0] && stage <= x.stages[1])[0];
     if (f && s.round.rivals.length < 2) { const fair = s.round.fair; s.round.rivals.push({ id: f.id, name: f.name, u: (f.brand - 50) / 50 + 3.2 * Math.log(1 + f.pay) - 0.1 + f.friendly * 0.8 + f.speed * 0.4 + f.va * 0.4, pre: fair * (1 + f.pay) }); }
   }
   const d = makeDeal(s, channel);
-  if (channel === 'referral') d.referrer = rp(G.rng, ['a co-investor', 'a portfolio founder', 'an old colleague', 'an LP', 'a scout in your network', 'your barber (really)']);
+  if (channel === 'referral') d.referrer = rp(G.wr, ['a co-investor', 'a portfolio founder', 'an old colleague', 'an LP', 'a scout in your network', 'your barber (really)']);
   return d;
 }
 
 function sourcingWeek() {
-  const nIn = rpois(G.rng, 2.1 + G.rep / 30);
+  const nIn = rpois(G.wr, 2.1 + G.rep / 30);
   for (let i = 0; i < nIn; i++) sourceDeal('inbound');
   const refP = clamp(0.12 + G.net / 160 + (G.founderRel - 50) / 400, 0.05, 0.7);
-  if (rc(G.rng, refP)) sourceDeal('referral');
-  if (G.net > 40 && rc(G.rng, 0.12)) sourceDeal('referral');
-  for (const sec of G.staff.scouts) if (rc(G.rng, 0.35)) sourceDeal('scout', { sector: sec });
+  if (rc(G.wr, refP)) sourceDeal('referral');
+  if (G.net > 40 && rc(G.wr, 0.12)) sourceDeal('referral');
+  for (const sec of G.staff.scouts) if (rc(G.wr, 0.35)) sourceDeal('scout', { sector: sec });
   // hot deal
-  if (G.week > 6 && rc(G.rng, 0.012 + G.rep / 4000)) {
-    const d = sourceDeal('hot', { stage: clamp(ri(G.rng, G.thesis.smin, G.thesis.smax), 0, 5), sector: G.thesis.sectors.length ? rp(G.rng, G.thesis.sectors) : undefined, city: G.home });
+  if (G.week > 6 && rc(G.wr, 0.012 + G.rep / 4000)) {
+    const d = sourceDeal('hot', { stage: clamp(ri(G.wr, G.thesis.smin, G.thesis.smax), 0, 5), sector: G.thesis.sectors.length ? rp(G.wr, G.thesis.sectors) : undefined, city: G.home });
     d.col = 1; d.hotUntil = G.week + 2;
     const s = G.startups[d.sid]; know(s, 'P', s.h.P + rg(G.rng, 0, 16), 16); know(s, 'F', s.h.F + rg(G.rng, 0, 16), 16);
     toast(`Hot deal: ${s.name} is raising and moving fast — 2 weeks.`, 'warn');
@@ -927,13 +935,13 @@ function pipelineWeek() {
 // ------------------------------------------------------------------ macro / heat
 function updateHeat() {
   for (const sec of SECTORS) {
-    G.heatOu[sec.id] = G.heatOu[sec.id] * 0.97 + rg(G.rng, 0, 0.035);
+    G.heatOu[sec.id] = G.heatOu[sec.id] * 0.97 + rg(G.wr, 0, 0.035);
     G.heat[sec.id] = sectorHeatAt(sec, G.week, G.heatOu[sec.id]);
   }
 }
 function updateMacro() {
   const row = MACRO_TRANS[G.macro.regime];
-  const x = rf(G.rng); let acc = 0;
+  const x = rf(G.wr); let acc = 0;
   for (const k of Object.keys(row)) { acc += row[k]; if (x <= acc) { if (k !== G.macro.regime) { logMsg(`Macro regime shifts: ${MACRO[k].name}. Rates ${MACRO[k].rate}.`, k === 'bull' ? 'good' : k === 'normal' ? 'info' : 'warn'); G.macro = { regime: k, since: G.week }; } break; }
   }
 }
@@ -949,6 +957,7 @@ function boardSeats() { return activeHoldings().filter(h => h.board).length; }
 function advanceWeek() {
   if (G.over) return;
   const w = G.week;
+  G.wr = mkrng(hashStr(G.seed + ':wk:' + w)); // world stream: heat, macro and sourcing are independent of what you do
   // money
   if (w < FUND_WEEKS) callCapital(annualFee() / 52, 'fee');
   G.cash += personalWeekly();
@@ -1331,7 +1340,7 @@ function closeDeal(d, t) {
   h.diligence = diligenceCoverage(d);
   h.stage0 = rd.stage; h.q0 = s.q; h.entryW = G.week; h.entryPost = rec.post;
   if (s.fraud) h.fraudAt = G.week + ri(G.rng, 10, 60);
-  G.recent.push(!thesisFit(s).ok);
+  G.recent.push(!thesisFit(s).ok); if (G.recent.length > 30) G.recent.shift();
   G.stats.closed++;
   if (lead) G.rep = Math.min(100, G.rep + 0.3);
   if (rd.rivals.length) G.net += 0.4;
@@ -1366,11 +1375,14 @@ function helpAction(h, type) {
   const bump = (st, amt) => { const used = s.helped[st] || 0; const room = Math.max(0, 12 - used); const d = Math.min(room, amt); s.h[st] = Math.min(98, s.h[st] + d); s.helped[st] = used + d; return d; };
   if (rf(G.rng) >= p) { logMsg(`${HELP_INFO[type].name} for ${s.name} didn't land this time.`, 'info'); return okr('It didn\'t land.', { landed: false }); }
   let msg = '';
-  if (type === 'intro') { if (s.round) s.round.prep += 0.35; else s.nextPrep = (s.nextPrep || 0) + 0.35; G.net += 0.4; msg = 'Two good investors took the call.'; }
-  if (type === 'hire') { bump('F', rr(G.rng, 1.5, 3.5)); msg = 'A strong senior hire signed.'; }
-  if (type === 'raise') { if (s.round) s.round.prep += 0.5; else s.nextPrep = (s.nextPrep || 0) + 0.5; msg = 'The pitch narrative got sharper.'; }
-  if (type === 'pivot') { const d = bump('P', s.h.P < 55 ? rr(G.rng, 3, 9) : rr(G.rng, 0.5, 2)); if (s.h.P < 55) s.gMod += 0.004; msg = 'The new positioning resonated.'; }
-  if (type === 'cust') { bump('P', rr(G.rng, 1, 3)); s.mrr *= 1 + rr(G.rng, 0.03, 0.09); G.net += 0.3; msg = 'Three new customers signed.'; }
+  // diminishing returns: every extra favour to the same company works less well
+  s.helpN = s.helpN || {}; const n = s.helpN[type] = (s.helpN[type] || 0) + 1;
+  const dm = Math.pow(0.8, n - 1);
+  if (type === 'intro') { if (s.round) s.round.prep = Math.min(0.8, s.round.prep + 0.35 * dm); else s.nextPrep = Math.min(0.8, (s.nextPrep || 0) + 0.35 * dm); G.net = Math.min(100, G.net + 0.4 * (1 - G.net / 100)); msg = 'Two good investors took the call.'; }
+  if (type === 'hire') { bump('F', rr(G.rng, 1.5, 3.5) * dm); msg = 'A strong senior hire signed.'; }
+  if (type === 'raise') { if (s.round) s.round.prep = Math.min(0.8, s.round.prep + 0.5 * dm); else s.nextPrep = Math.min(0.8, (s.nextPrep || 0) + 0.5 * dm); msg = 'The pitch narrative got sharper.'; }
+  if (type === 'pivot') { bump('P', (s.h.P < 55 ? rr(G.rng, 3, 9) : rr(G.rng, 0.5, 2)) * dm); if (s.h.P < 55) s.gMod += 0.004 * dm; msg = 'The new positioning resonated.'; }
+  if (type === 'cust') { bump('P', rr(G.rng, 1, 3) * dm); s.mrr *= 1 + rr(G.rng, 0.03, 0.08) * dm; G.net = Math.min(100, G.net + 0.3 * (1 - G.net / 100)); msg = 'Three new customers signed.'; }
   G.vaScore = Math.min(1, G.vaScore + 0.02); G.rep = Math.min(100, G.rep + 0.05);
   h.rel = Math.min(100, h.rel + 1);
   logMsg(`${HELP_INFO[type].name} for ${s.name}: ${msg}`, 'good');
@@ -1447,16 +1459,31 @@ function skipWeeks(n) {
 // METRICS: NAV, TVPI / DPI / net IRR, final scoring
 // ============================================================================
 
+// Net IRR: finds the economically meaningful root nearest to 0% (late fee calls can create several sign changes)
 function xirr(flows) {
   let hasNeg = false, hasPos = false;
   for (const f of flows) { if (f.a < 0) hasNeg = true; if (f.a > 0) hasPos = true; }
   if (!hasNeg || !hasPos) return null;
   const npv = r => { let t = 0; for (const f of flows) t += f.a / Math.pow(1 + r, f.w / 52); return t; };
-  let lo = -0.95, hi = 4;
-  let flo = npv(lo), fhi = npv(hi);
-  if (flo * fhi > 0) return flo > 0 ? hi : lo;
-  for (let i = 0; i < 80; i++) { const mid = (lo + hi) / 2, fm_ = npv(mid); if (flo * fm_ <= 0) { hi = mid; fhi = fm_; } else { lo = mid; flo = fm_; } }
-  return (lo + hi) / 2;
+  const f0 = npv(0);
+  if (Math.abs(f0) < 1) return 0;
+  const dir = f0 > 0 ? 1 : -1;
+  let prev = 0, fprev = f0;
+  for (let i = 1; i <= 400; i++) {
+    const r = dir > 0 ? i * 0.01 : -i * 0.0024, fr = npv(r);
+    if (fr * fprev <= 0) {
+      let lo = Math.min(prev, r), hi = Math.max(prev, r), flo = npv(lo);
+      for (let k = 0; k < 50; k++) { const mid = (lo + hi) / 2, fmid = npv(mid); if (flo * fmid <= 0) hi = mid; else { lo = mid; flo = fmid; } }
+      return (lo + hi) / 2;
+    }
+    prev = r; fprev = fr;
+  }
+  if (dir > 0) return 4;
+  // no root (late fee calls after distributions): fall back to a modified IRR from weighted durations
+  let neg = 0, pos = 0, tn = 0, tp = 0;
+  for (const f of flows) { if (f.a < 0) { neg -= f.a; tn -= f.a * f.w; } else { pos += f.a; tp += f.a * f.w; } }
+  const yrs = Math.max(1, (tp / Math.max(1, pos) - tn / Math.max(1, neg)) / 52);
+  return Math.max(-0.95, Math.pow(Math.max(0.001, pos / neg), 1 / yrs) - 1);
 }
 
 function positionValue(h, final) {
@@ -1484,7 +1511,7 @@ function scoreFund(m) {
   const irr = m.irr == null ? -0.2 : m.irr;
   const a = clamp(irr / 0.25, 0, 1), b = clamp((m.tvpi - 1) / 2.5, 0, 1), c = clamp(m.dpi / 3, 0, 1);
   const base = 100 * (0.35 * a + 0.35 * b + 0.30 * c);
-  const repBonus = clamp(G.rep / 100, 0, 1) * 6;
+  const repBonus = clamp((0.6 * G.rep + 0.4 * G.lpTrust) / 100, 0, 1) * 6;
   const score = Math.round(base + repBonus);
   const T = [
     [92, 'S', 'Hall of Fame GP'], [78, 'A', 'Top-decile manager'], [60, 'B', 'Top-quartile manager'],
@@ -1531,7 +1558,8 @@ const EVENT_DEFS = {
       return [`Insiders are being asked to commit first. Your decision is a signal: pass, and the market reads it as a bad sign; follow, and it reads as conviction.`,
         `Target raise ~${fm(rd.raise)}${rd.safe ? ' on a SAFE' : ''}. Reported MRR ${fm(s.mrr)}, runway ${runwayMo(s) > 40 ? '40+' : runwayMo(s).toFixed(0)} months.`,
         `Your stake: ${fp(ownPct(s, h), 1)} (cost ${fm(h.invested)}, mark ${fm(holdingMark(h))}). Pro-rata ${h.prorata ? 'rights' : 'courtesy allocation (no rights)'}: ${fm(amt)}.`,
-        `Dry powder ${fm(dryPowder())}, of which reserves ${fm(G.reserveLeft)}.`];
+        `Dry powder ${fm(dryPowder())}, of which reserves ${fm(G.reserveLeft)}.`,
+        `Your read: ${STATS.map(st => STAT_SHORT[st] + ' ' + (s.know[st] ? ratingWord(s.know[st].m) : '?')).join(' · ')}.`];
     },
     opts: (ev, s, h) => {
       const amt = proRataAmt(s, h), f = followFunds();
@@ -2104,7 +2132,6 @@ function sfx(name) {
 
 // ---------- shared drawing helpers ----------
 function sectorDot(x, y, sid, r) { ctx.fillStyle = SECTOR_BY_ID[sid].col; ctx.beginPath(); ctx.arc(x, y, r || 4, 0, 6.3); ctx.fill(); }
-function ratingWord(m) { return m >= 72 ? 'Strong' : m >= 58 ? 'Good' : m >= 44 ? 'Mixed' : m >= 30 ? 'Weak' : 'Poor'; }
 function ratingCol(m) { return m >= 62 ? C.green : m >= 45 ? C.gold : C.red; }
 function logCol(k) { return k === 'good' ? C.green : k === 'bad' ? C.red : k === 'warn' ? C.amber : C.faint; }
 
@@ -2143,13 +2170,13 @@ function drawFrame() {
   }
   tip(560, 6, 300, 40, 'Net TVPI (marks + distributions, after fees and accrued carry), DPI (cash returned), net NAV, and your personal cash. The J-curve is real.');
   const M = MACRO[G.macro.regime];
-  chip(x + 4, 17, M.name, M.col); tip(x + 4, 17, 110, 17, `Macro regime: ${M.name}. Rates ${M.rate}. Drives valuations, exit multiples and IPO windows.`);
   // controls
   const busy = G.queue.length > 0;
   if (button('end', W - 150, 8, 136, 34, 'End week ▶', { kind: 'primary', disabled: busy, why: 'Resolve the pending decision first.', tip: 'Advance one week (Space). Unspent AP is lost.', w: 800 })) doEndTurn();
-  if (button('skip', W - 232, 8, 74, 34, '+4 wks', { disabled: busy, why: 'Resolve the pending decision first.', tip: 'Fast-forward up to 4 weeks. Stops if a decision comes up.' })) doSkip(4);
-  if (button('menu', W - 306, 8, 66, 34, 'Menu', {})) S.menu = true;
-  if (button('help', W - 340, 8, 28, 34, '?', { w: 800 })) S.help = true;
+  if (button('skip', W - 214, 8, 58, 34, '+4w', { disabled: busy, why: 'Resolve the pending decision first.', tip: 'Fast-forward up to 4 weeks. Stops if a decision comes up.' })) doSkip(4);
+  if (button('skipq', W - 278, 8, 58, 34, '+13w', { disabled: busy, why: 'Resolve the pending decision first.', tip: 'Fast-forward a quarter. Stops if a decision comes up.' })) doSkip(13);
+  if (button('menu', W - 346, 8, 62, 34, 'Menu', {})) S.menu = true;
+  if (button('help', W - 380, 8, 28, 34, '?', { w: 800 })) S.help = true;
   // tabs
   let tx = 14;
   const counts = { pipeline: G.deals.filter(d => d.status === 'open').length, portfolio: activeHoldings().length };
@@ -2159,6 +2186,7 @@ function drawFrame() {
     tx += 122;
   }
   T(`Dry powder ${fm(dryPowder())}   ·   Initial-check budget ${fm(Math.max(0, generalPowder()))}   ·   Reserves ${fm(G.reserveLeft)}`, W - 16, 70, { s: 11.5, c: C.dim, a: 'right' });
+  const mw_ = chip(640, 62, M.name, M.col); tip(640, 62, mw_, 17, `Macro regime: ${M.name}. Rates ${M.rate}. Drives valuations, exit multiples and IPO windows.`);
   // footer log
   ctx.fillStyle = C.bg2; ctx.fillRect(0, 676, W, 44); ctx.fillStyle = C.line; ctx.fillRect(0, 676, W, 1);
   const lg = G.log.slice(-2);
@@ -2416,7 +2444,7 @@ function drawDealModal() {
   const mx2 = mx_ + 378, mw2 = 420;
   panel(mx2, ly, mw2, 256, 'DILIGENCE TOOLKIT');
   const canTools = d.col >= 3;
-  if (!canTools) T('Move the deal to Diligence to unlock the toolkit.', mx2 + 14, ly + 40, { s: 12, c: C.faint });
+  if (!canTools) T('Move the deal to Diligence to unlock', mx2 + mw2 - 14, ly + 17, { s: 11, c: C.amber, a: 'right' });
   TOOL_ORDER.forEach((t, i) => {
     const ti = TOOL_INFO[t], av = toolAvailable(d, t), y = ly + 32 + i * 36;
     const done = t === 'cust' ? (d.tools.cust || 0) : d.tools[t] ? 1 : 0;
@@ -2736,7 +2764,16 @@ function drawHoldingDetail(r, x, y, w, h_) {
   chip(x + 16, yy, h.board ? 'BOARD SEAT' : 'no board seat', h.board ? C.green : C.faint, { s: 9.5 });
   chip(x + 110, yy, h.prorata ? 'PRO-RATA RIGHTS' : 'no pro-rata rights', h.prorata ? C.green : C.faint, { s: 9.5 });
   if (s.round && !s.round.taken) chip(x + 240, yy, `Raising ${stageName(s.round.stage)}`, C.gold, { s: 9.5 });
-  yy += 26;
+  yy += 24;
+  if (r.active) {
+    T('YOUR READ', x + 16, yy + 6, { s: 10.5, w: 800, c: C.faint });
+    STATS.forEach((st, i) => {
+      const k = s.know[st], bx_ = x + 96 + (i % 3) * 120, by = yy - (i < 3 ? 0 : -16);
+      T(STAT_SHORT[st], bx_, by + 6, { s: 10.5, c: C.dim });
+      T(k ? ratingWord(k.m) : '?', bx_ + 52, by + 6, { s: 10.5, w: 700, c: k ? ratingCol(k.m) : C.faint });
+    });
+    yy += 38;
+  }
   // cap table
   T('CAP TABLE', x + 16, yy + 6, { s: 10.5, w: 800, c: C.faint });
   const cap = capRows(s);

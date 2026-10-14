@@ -291,6 +291,5 @@ function sfx(name) {
 
 // ---------- shared drawing helpers ----------
 function sectorDot(x, y, sid, r) { ctx.fillStyle = SECTOR_BY_ID[sid].col; ctx.beginPath(); ctx.arc(x, y, r || 4, 0, 6.3); ctx.fill(); }
-function ratingWord(m) { return m >= 72 ? 'Strong' : m >= 58 ? 'Good' : m >= 44 ? 'Mixed' : m >= 30 ? 'Weak' : 'Poor'; }
 function ratingCol(m) { return m >= 62 ? C.green : m >= 45 ? C.gold : C.red; }
 function logCol(k) { return k === 'good' ? C.green : k === 'bad' ? C.red : k === 'warn' ? C.amber : C.faint; }

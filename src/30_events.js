@@ -22,7 +22,8 @@ const EVENT_DEFS = {
       return [`Insiders are being asked to commit first. Your decision is a signal: pass, and the market reads it as a bad sign; follow, and it reads as conviction.`,
         `Target raise ~${fm(rd.raise)}${rd.safe ? ' on a SAFE' : ''}. Reported MRR ${fm(s.mrr)}, runway ${runwayMo(s) > 40 ? '40+' : runwayMo(s).toFixed(0)} months.`,
         `Your stake: ${fp(ownPct(s, h), 1)} (cost ${fm(h.invested)}, mark ${fm(holdingMark(h))}). Pro-rata ${h.prorata ? 'rights' : 'courtesy allocation (no rights)'}: ${fm(amt)}.`,
-        `Dry powder ${fm(dryPowder())}, of which reserves ${fm(G.reserveLeft)}.`];
+        `Dry powder ${fm(dryPowder())}, of which reserves ${fm(G.reserveLeft)}.`,
+        `Your read: ${STATS.map(st => STAT_SHORT[st] + ' ' + (s.know[st] ? ratingWord(s.know[st].m) : '?')).join(' · ')}.`];
     },
     opts: (ev, s, h) => {
       const amt = proRataAmt(s, h), f = followFunds();

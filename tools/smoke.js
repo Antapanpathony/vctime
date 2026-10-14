@@ -1,10 +1,10 @@
 // Browser smoke test: boots index.html in headless Chromium, drives the real UI with the mouse, screenshots each screen.
 // usage: node tools/smoke.js [outdir]
-const { chromium } = require('/opt/node22/lib/node_modules/playwright');
+const { launch } = require('./browser');
 const path = require('path');
 const out = process.argv[2] || '/tmp/claude-0/shots';
 (async () => {
-  const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome', args: ['--no-sandbox'] });
+  const browser = await launch();
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   const errors = [];
   page.on('pageerror', e => errors.push('pageerror: ' + e.message));

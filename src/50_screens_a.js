@@ -33,13 +33,13 @@ function drawFrame() {
   }
   tip(560, 6, 300, 40, 'Net TVPI (marks + distributions, after fees and accrued carry), DPI (cash returned), net NAV, and your personal cash. The J-curve is real.');
   const M = MACRO[G.macro.regime];
-  chip(x + 4, 17, M.name, M.col); tip(x + 4, 17, 110, 17, `Macro regime: ${M.name}. Rates ${M.rate}. Drives valuations, exit multiples and IPO windows.`);
   // controls
   const busy = G.queue.length > 0;
   if (button('end', W - 150, 8, 136, 34, 'End week ▶', { kind: 'primary', disabled: busy, why: 'Resolve the pending decision first.', tip: 'Advance one week (Space). Unspent AP is lost.', w: 800 })) doEndTurn();
-  if (button('skip', W - 232, 8, 74, 34, '+4 wks', { disabled: busy, why: 'Resolve the pending decision first.', tip: 'Fast-forward up to 4 weeks. Stops if a decision comes up.' })) doSkip(4);
-  if (button('menu', W - 306, 8, 66, 34, 'Menu', {})) S.menu = true;
-  if (button('help', W - 340, 8, 28, 34, '?', { w: 800 })) S.help = true;
+  if (button('skip', W - 214, 8, 58, 34, '+4w', { disabled: busy, why: 'Resolve the pending decision first.', tip: 'Fast-forward up to 4 weeks. Stops if a decision comes up.' })) doSkip(4);
+  if (button('skipq', W - 278, 8, 58, 34, '+13w', { disabled: busy, why: 'Resolve the pending decision first.', tip: 'Fast-forward a quarter. Stops if a decision comes up.' })) doSkip(13);
+  if (button('menu', W - 346, 8, 62, 34, 'Menu', {})) S.menu = true;
+  if (button('help', W - 380, 8, 28, 34, '?', { w: 800 })) S.help = true;
   // tabs
   let tx = 14;
   const counts = { pipeline: G.deals.filter(d => d.status === 'open').length, portfolio: activeHoldings().length };
@@ -49,6 +49,7 @@ function drawFrame() {
     tx += 122;
   }
   T(`Dry powder ${fm(dryPowder())}   ·   Initial-check budget ${fm(Math.max(0, generalPowder()))}   ·   Reserves ${fm(G.reserveLeft)}`, W - 16, 70, { s: 11.5, c: C.dim, a: 'right' });
+  const mw_ = chip(640, 62, M.name, M.col); tip(640, 62, mw_, 17, `Macro regime: ${M.name}. Rates ${M.rate}. Drives valuations, exit multiples and IPO windows.`);
   // footer log
   ctx.fillStyle = C.bg2; ctx.fillRect(0, 676, W, 44); ctx.fillStyle = C.line; ctx.fillRect(0, 676, W, 1);
   const lg = G.log.slice(-2);
@@ -306,7 +307,7 @@ function drawDealModal() {
   const mx2 = mx_ + 378, mw2 = 420;
   panel(mx2, ly, mw2, 256, 'DILIGENCE TOOLKIT');
   const canTools = d.col >= 3;
-  if (!canTools) T('Move the deal to Diligence to unlock the toolkit.', mx2 + 14, ly + 40, { s: 12, c: C.faint });
+  if (!canTools) T('Move the deal to Diligence to unlock', mx2 + mw2 - 14, ly + 17, { s: 11, c: C.amber, a: 'right' });
   TOOL_ORDER.forEach((t, i) => {
     const ti = TOOL_INFO[t], av = toolAvailable(d, t), y = ly + 32 + i * 36;
     const done = t === 'cust' ? (d.tools.cust || 0) : d.tools[t] ? 1 : 0;

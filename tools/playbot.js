@@ -3,6 +3,7 @@
 const { load } = require('./load');
 const games = +process.argv[2] || 3, skill = +(process.argv[3] || 1);
 const api = load();
+function trueQ(s) { return 0.4 * s.h.F + 0.4 * s.h.P + 0.2 * s.h.T; }
 function estQ(s) { const k = s.know; const get = (x, d) => (k[x] ? k[x].m : d); return 0.4 * get('F', 45) + 0.4 * get('P', 45) + 0.2 * get('T', 45); }
 const results = [];
 for (let gi = 0; gi < games; gi++) {
@@ -16,7 +17,9 @@ for (let gi = 0; gi < games; gi++) {
         const ev = G.queue[0];
         if (!api.eventValid(ev)) { G.queue.shift(); continue; }
         const v = api.eventView(ev); const ok = v.opts.filter(o => !o.disabled);
-        const prefer = ({ followon: ['full', 'half', 'pass'], runway: ['bridge', 'sell', 'shut'], downround: ['support', 'accept'], antidil: ['waive', 'enforce'], fraud: ['ok'], cofounder: ['mediate', 'back'], custlost: ['win', 'accept'], competitor: ['dd', 'ignore'], regulatory: ['pay', 'ignore'], poach: ['keep', 'let'], scandal: ['stand', 'distance'], acquihire: ['sell', 'hold'], exitoffer: ['sell', 'go', 'no'], lpliquidity: ['buyer', 'own', 'no'], leak: ['apol', 'ignore'] })[ev.type];
+        const sE = ev.sid ? G.startups[ev.sid] : null;
+        const hi = sE && skill === 2 ? trueQ(sE) >= 58 && !sE.fraud : true;
+        const prefer = skill === 2 ? ({ followon: [hi ? 'full' : 'pass', 'pass'], runway: [hi ? 'bridge' : 'sell', 'sell'], downround: ['accept'], antidil: ['waive'], fraud: ['ok'], cofounder: ['mediate', 'back'], custlost: ['win', 'accept'], competitor: ['dd', 'ignore'], regulatory: ['pay', 'ignore'], poach: ['keep', 'let'], scandal: ['stand', 'distance'], acquihire: ['sell'], exitoffer: ['sell', 'go'], lpliquidity: ['buyer', 'own', 'no'], leak: ['apol', 'ignore'] })[ev.type] : ({ followon: ['full', 'half', 'pass'], runway: ['bridge', 'sell', 'shut'], downround: ['support', 'accept'], antidil: ['waive', 'enforce'], fraud: ['ok'], cofounder: ['mediate', 'back'], custlost: ['win', 'accept'], competitor: ['dd', 'ignore'], regulatory: ['pay', 'ignore'], poach: ['keep', 'let'], scandal: ['stand', 'distance'], acquihire: ['sell', 'hold'], exitoffer: ['sell', 'go', 'no'], lpliquidity: ['buyer', 'own', 'no'], leak: ['apol', 'ignore'] })[ev.type];
         let pick = null; for (const p of prefer) if (ok.find(o => o.id === p)) { pick = p; break; }
         if (!pick) pick = ok[0] ? ok[0].id : v.opts[0].id;
         api.resolveEvent(ev, pick);
@@ -30,10 +33,12 @@ for (let gi = 0; gi < games; gi++) {
       for (const d of open) {
         const s = G.startups[d.sid];
         if (d.status !== 'open') continue;
+        if (skill === 2 && d.col <= 3 && !(api.thesisFit(s).ok && trueQ(s) >= 60 && !s.fraud && s.h.I > 35)) { if (d.col >= 1 || G.week - d.w0 > 1) api.passDeal(d); continue; }
         if (d.col === 0 && G.ap > 6) { if (api.thesisFit(s).ok || skill === 0) api.advanceDeal(d); else if (G.week - d.w0 > 1) api.passDeal(d); }
         else if (d.col === 1 && G.ap > 5) { api.advanceDeal(d); }
         else if (d.col === 2 && G.ap > 4) { api.advanceDeal(d); }
         else if (d.col === 3 && G.ap > 3) {
+          if (skill === 2) { api.advanceDeal(d); continue; }
           if (skill) { for (const t of ['data', 'refs', 'cust', 'tech', 'bg']) if (G.ap > 2) api.useTool(d, t); if (G.ap > 4) api.hqVisit(d, 'qa'); }
           const q = estQ(s), fraudFlag = d.bg === 'flags' || (s.know.I && s.know.I.m < 40);
           if (skill && (q < 56 || fraudFlag)) { api.passDeal(d); continue; }

@@ -92,12 +92,12 @@ const REGION_NAMES = { AM: 'Americas', EU: 'Europe / ME', AS: 'Asia' };
 
 // bench = ARR needed to raise *this* round; pre/raise = fair round at r=1, neutral market
 const STAGES = [
-  { id: 'preseed', short: 'Pre-seed', pre: 4.5e6,  raise: 0.9e6, bench: 0,      damp: 1.2, burnMo: 40e3,  weeksOpen: [8, 13] },
-  { id: 'seed',    short: 'Seed',     pre: 12e6,   raise: 2.5e6, bench: 150e3,  damp: 1.05, burnMo: 110e3, weeksOpen: [8, 13] },
-  { id: 'a',       short: 'Series A', pre: 32e6,   raise: 10e6,  bench: 0.9e6,  damp: 0.95, burnMo: 380e3, weeksOpen: [8, 13] },
-  { id: 'b',       short: 'Series B', pre: 105e6,  raise: 28e6,  bench: 3.4e6,  damp: 0.9, burnMo: 1.0e6, weeksOpen: [8, 13] },
-  { id: 'c',       short: 'Series C', pre: 290e6,  raise: 65e6,  bench: 10e6,   damp: 0.85, burnMo: 2.4e6, weeksOpen: [8, 13] },
-  { id: 'g',       short: 'Growth',   pre: 720e6,  raise: 130e6, bench: 28e6,   damp: 0.8, burnMo: 5e6,   weeksOpen: [8, 13] },
+  { id: 'preseed', short: 'Pre-seed', pre: 3.6e6,  raise: 0.9e6, bench: 0,      damp: 1.2, burnMo: 40e3,  weeksOpen: [8, 13] },
+  { id: 'seed',    short: 'Seed',     pre: 10e6,   raise: 2.5e6, bench: 150e3,  damp: 1.05, burnMo: 110e3, weeksOpen: [8, 13] },
+  { id: 'a',       short: 'Series A', pre: 38e6,   raise: 10e6,  bench: 0.9e6,  damp: 0.95, burnMo: 380e3, weeksOpen: [8, 13] },
+  { id: 'b',       short: 'Series B', pre: 130e6,  raise: 28e6,  bench: 3.4e6,  damp: 0.9, burnMo: 1.0e6, weeksOpen: [8, 13] },
+  { id: 'c',       short: 'Series C', pre: 360e6,  raise: 65e6,  bench: 10e6,   damp: 0.85, burnMo: 2.4e6, weeksOpen: [8, 13] },
+  { id: 'g',       short: 'Growth',   pre: 900e6,  raise: 130e6, bench: 28e6,   damp: 0.8, burnMo: 5e6,   weeksOpen: [8, 13] },
 ];
 
 const MACRO = {
@@ -151,3 +151,4 @@ const CASHCOST = { tech: 4000, bg: 2500, legalSafe: 2500, legalPriced: 9000 };
 
 const stg = k => STAGES[Math.min(5, Math.max(0, k))];
 const stageName = k => k <= 5 ? STAGES[Math.max(0, k)].short : 'Growth ' + (k - 4);
+const ratingWord = m => m >= 72 ? 'Strong' : m >= 58 ? 'Good' : m >= 44 ? 'Mixed' : m >= 30 ? 'Weak' : 'Poor';
